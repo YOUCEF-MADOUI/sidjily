@@ -25,7 +25,8 @@
         <label for="physical-commune">Commune</label>
         <input id="physical-commune" name="commune" type="text" role="combobox"
                aria-label="Commune" aria-autocomplete="list" aria-required="true" class="commune-autocomplete"
-               data-endpoint="/fr/api/communes?token=COMMUNE-TOKEN" data-value="PRIVATE QUERY">
+               data-endpoint="/fr/api/communes?token=COMMUNE-TOKEN" data-dependent-on="physical-wilaya"
+               data-value="PRIVATE QUERY">
         <label for="physical-activity">Activité</label>
         <select id="physical-activity" name="activity" required>
           <option value="a1">Commerce de détail</option><option value="a2">Services</option>

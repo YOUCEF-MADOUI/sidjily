@@ -44,6 +44,7 @@ class PageDiagnostics:
     form_diagnostics: FormDiagnosticBundle = FormDiagnosticBundle((), ())
     report: str = ""
     portlet_scope_found: bool = False
+    portlet_scopes: tuple[tuple[str, str, str, str], ...] = ()
 
 
 class SearchModeAnalysisError(RuntimeError):
@@ -86,7 +87,7 @@ DOM_SNAPSHOT_SCRIPT = r"""(options = {}) => {
         'etat commercant', 'nationalite', 'qualite'];
     const sensitiveOptionLabels = ['nom', 'prenom', 'email', 'e-mail', 'telephone', 'date',
         'numero', 'inscription', 'raison sociale', 'commercial', 'dirigeant', 'adresse', 'nif', 'nis'];
-    const safeDataAttribute = /^data-(?:test(?:id)?|qa|cy|automation-id|field(?:-name)?|role|select2-id|ajax(?:--?(?:url|type|method))?|api(?:-(?:url|method))?|endpoint(?:-url)?|url|href|method|remote|controller|component|widget)$/i;
+    const safeDataAttribute = /^data-(?:test(?:id)?|qa|cy|automation-id|field(?:-name)?|role|select2-id|ajax(?:--?(?:url|type|method))?|api(?:-(?:url|method))?|endpoint(?:-url)?|url|href|method|remote|controller|component|widget|target|parent(?:-id)?|depends-on|dependent-on|dependency|cascade)$/i;
     const visible = element => {
         const style = window.getComputedStyle(element);
         return !!(element.getClientRects().length && style.visibility !== 'hidden' &&
@@ -167,7 +168,7 @@ DOM_SNAPSHOT_SCRIPT = r"""(options = {}) => {
     };
     const formInfo = element => {
         const form = element.closest('form') || element.form || null;
-        if (!form) return {id: 'hors-formulaire', title: 'Hors formulaire', action: '', method: ''};
+        if (!form) return {id: 'hors-formulaire', title: 'Hors formulaire', name: '', action: '', method: ''};
         const id = form.id || `formulaire-${query('form').indexOf(form) + 1}`;
         const action = element.getAttribute('formaction') ?? form.getAttribute('action') ?? '';
         const method = element.getAttribute('formmethod') ?? form.getAttribute('method') ?? 'GET';
@@ -175,6 +176,7 @@ DOM_SNAPSHOT_SCRIPT = r"""(options = {}) => {
             id,
             title: form.getAttribute('aria-label') || form.getAttribute('title') ||
                 form.querySelector('legend')?.innerText?.trim() || `Formulaire ${id}`,
+            name: form.getAttribute('name') || '',
             action: safeDestination(action),
             method: method.toUpperCase()
         };
@@ -190,7 +192,10 @@ DOM_SNAPSHOT_SCRIPT = r"""(options = {}) => {
     const portletSelector = '[id*="dz_cnrc_sidjilcom_recherchedetaillee_portlet_RechercheDetailleePortlet"], ' +
         '[class*="dz_cnrc_sidjilcom_recherchedetaillee_portlet_RechercheDetailleePortlet"]';
     const scope = options.portletOnly ? document.querySelector(portletSelector) : document;
-    if (!scope) return {forms: [], fields: [], buttons: [], clickables: [], scope_found: false};
+    if (!scope) return {forms: [], fields: [], buttons: [], clickables: [], scope_found: false, scope_info: null};
+    const scopeInfo = options.portletOnly && scope.nodeType === Node.ELEMENT_NODE ? {
+        tag_name: scope.tagName.toLowerCase(), id: scope.id || '', class_name: scope.getAttribute('class') || ''
+    } : null;
     const query = selector => [
         ...(scope.nodeType === Node.ELEMENT_NODE && scope.matches(selector) ? [scope] : []),
         ...Array.from(scope.querySelectorAll(selector))
@@ -199,6 +204,7 @@ DOM_SNAPSHOT_SCRIPT = r"""(options = {}) => {
         form_id: form.id || `formulaire-${index + 1}`,
         form_title: form.getAttribute('aria-label') || form.getAttribute('title') ||
             form.querySelector('legend')?.innerText?.trim() || `Formulaire ${index + 1}`,
+        form_name: form.getAttribute('name') || '',
         action: safeDestination(form.getAttribute('action') || ''),
         method: (form.getAttribute('method') || 'GET').toUpperCase()
     }));
@@ -218,6 +224,11 @@ DOM_SNAPSHOT_SCRIPT = r"""(options = {}) => {
         const role = element.getAttribute('role') || '';
         const form = formInfo(element);
         const label = associatedText(element);
+        const listId = element.getAttribute('list') || '';
+        const referencedDataList = listId ? document.getElementById(listId) : null;
+        const dataListInScope = referencedDataList &&
+            (scope.nodeType === Node.DOCUMENT_NODE || scope.contains(referencedDataList));
+        const dataList = dataListInScope ? referencedDataList : null;
         const record = {
             label,
             associated_text: label,
@@ -231,22 +242,29 @@ DOM_SNAPSHOT_SCRIPT = r"""(options = {}) => {
             aria_label: element.getAttribute('aria-label') || '',
             aria_labelledby: element.getAttribute('aria-labelledby') || '',
             aria_autocomplete: element.getAttribute('aria-autocomplete') || '',
+            list_id: listId,
             placeholder: element.getAttribute('placeholder') || '',
             data_attributes: dataAttributes(element),
             required: !!element.required || element.hasAttribute('required') ||
                 element.getAttribute('aria-required') === 'true',
+            readonly: !!element.readOnly || element.hasAttribute('readonly') ||
+                element.getAttribute('aria-readonly') === 'true',
             disabled: !!element.disabled || element.getAttribute('aria-disabled') === 'true',
             visible: visible(element),
             hierarchy: hierarchy(element),
             form_id: form.id,
             form_title: form.title,
+            form_name: form.name,
             form_action: form.action,
             form_method: form.method,
             onclick_present: element.hasAttribute('onclick'),
             onclick_handler: inlineHandlerName(element),
-            option_count: tag === 'select' ? element.options.length : 0,
-            options: tag === 'select' && mayReadOptionText(label)
-                ? Array.from(element.options).map(option => option.innerText?.trim() || '') : []
+            option_count: tag === 'select' ? element.options.length : (dataList?.options.length || 0),
+            options: mayReadOptionText(label) && tag === 'select'
+                ? Array.from(element.options).map(option => option.innerText?.trim() || '')
+                : mayReadOptionText(label) && dataList
+                    ? Array.from(dataList.options).map(option => option.label?.trim() || option.innerText?.trim() || '')
+                    : []
         };
         const isButton = tag === 'button' ||
             (tag === 'input' && ['submit', 'button', 'reset', 'image'].includes(type)) || role === 'button';
@@ -265,7 +283,7 @@ DOM_SNAPSHOT_SCRIPT = r"""(options = {}) => {
                 element.getAttribute('aria-label') || element.getAttribute('title') || '', nature: 'élément cliquable'});
         }
     }
-    return {forms, fields, buttons, clickables, scope_found: true};
+    return {forms, fields, buttons, clickables, scope_found: true, scope_info: scopeInfo};
 }"""
 
 
@@ -436,6 +454,7 @@ class PlaywrightBrowser:
             "frames": [], "form_entries": [], "fields": [], "buttons": [], "clickables": []
         }
         portlet_scope_found = not portlet_only
+        portlet_scopes: list[tuple[str, str, str, str]] = []
         for frame_index, frame in enumerate(list(self._page.frames)):
             fallback_name = "Document principal" if frame_index == 0 else f"Frame {frame_index}"
             frame_name = fallback_name
@@ -451,6 +470,14 @@ class PlaywrightBrowser:
                     raise TypeError("snapshot DOM indisponible")
                 if portlet_only and snapshot.get("scope_found") is True:
                     portlet_scope_found = True
+                    scope_info = snapshot.get("scope_info")
+                    if isinstance(scope_info, dict):
+                        portlet_scopes.append((
+                            frame_name,
+                            sanitize_metadata_text(scope_info.get("tag_name", ""), 40),
+                            sanitize_metadata_text(scope_info.get("id", ""), 120),
+                            sanitize_metadata_text(scope_info.get("class_name", ""), 160),
+                        ))
             except Exception:
                 # Ne pas exposer l'exception : elle pourrait contenir une URL ou des données de page.
                 raw["frames"].append({
@@ -507,6 +534,7 @@ class PlaywrightBrowser:
             form_diagnostics=bundle,
             report="",
             portlet_scope_found=portlet_scope_found,
+            portlet_scopes=tuple(portlet_scopes),
         )
         return PageDiagnostics(
             url=page.url,
@@ -517,6 +545,7 @@ class PlaywrightBrowser:
             form_diagnostics=bundle,
             report=format_diagnostic(page, bundle),
             portlet_scope_found=portlet_scope_found,
+            portlet_scopes=tuple(portlet_scopes),
         )
 
     def _search_mode_link(self, label: str, config: SessionConfig) -> tuple[Any, Any]:

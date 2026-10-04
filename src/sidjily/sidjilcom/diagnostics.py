@@ -39,7 +39,8 @@ _RESET_BUTTON_TEXT = re.compile(r"réinitialiser|reinitialiser|effacer|reset", r
 _SAFE_DATA_ATTRIBUTE = re.compile(
     r"data-(?:test(?:id)?|qa|cy|automation-id|field(?:-name)?|role|select2-id|"
     r"ajax(?:--?(?:url|type|method))?|api(?:-(?:url|method))?|"
-    r"endpoint(?:-url)?|url|href|method|remote|controller|component|widget)",
+    r"endpoint(?:-url)?|url|href|method|remote|controller|component|widget|target|"
+    r"parent(?:-id)?|depends-on|dependent-on|dependency|cascade)",
     re.IGNORECASE,
 )
 
@@ -67,6 +68,9 @@ class FormFieldDiagnostic:
     frame_url: str = ""
     class_name: str = ""
     required: bool = False
+    readonly: bool = False
+    list_id: str = ""
+    css_selector: str = ""
     aria_autocomplete: str = ""
     component_type: str = ""
     ajax_endpoint: str = ""
@@ -80,6 +84,7 @@ class FormDiagnostic:
     frame_name: str = "Document principal"
     frame_url: str = ""
     element_id: str = ""
+    name: str = ""
     action: str = ""
     method: str = "GET"
 
@@ -253,7 +258,7 @@ def build_form_diagnostics(raw: object) -> FormDiagnosticBundle:
 
     grouped: dict[
         tuple[str, str, str],
-        tuple[str, list[FormFieldDiagnostic], str, str, str],
+        tuple[str, list[FormFieldDiagnostic], str, str, str, str],
     ] = {}
     raw_forms = raw.get("form_entries", [])
     if isinstance(raw_forms, list):
@@ -269,6 +274,7 @@ def build_form_diagnostics(raw: object) -> FormDiagnosticBundle:
                     form_title,
                     [],
                     _safe_attribute("form_id", item.get("form_id"), 100),
+                    _safe_attribute("form_name", item.get("form_name"), 100),
                     _safe_href(item.get("action"), frame_url),
                     _safe_method(item.get("method")),
                 ),
@@ -296,6 +302,7 @@ def build_form_diagnostics(raw: object) -> FormDiagnosticBundle:
                     form_title,
                     [],
                     form_id,
+                    _safe_attribute("form_name", item.get("form_name"), 100),
                     _safe_href(item.get("form_action"), frame_url),
                     _safe_method(item.get("form_method")),
                 ),
@@ -307,10 +314,11 @@ def build_form_diagnostics(raw: object) -> FormDiagnosticBundle:
             frame_name=frame_name,
             frame_url=frame_url,
             element_id=element_id,
+            name=form_name,
             action=action,
             method=method,
         )
-        for (frame_name, frame_url, _form_id), (title, fields, element_id, action, method) in grouped.items()
+        for (frame_name, frame_url, _form_id), (title, fields, element_id, form_name, action, method) in grouped.items()
     )
 
     buttons = _build_buttons(raw.get("buttons", []), "bouton")
@@ -409,6 +417,7 @@ def _component_type(
     role: str,
     class_name: str,
     aria_autocomplete: str,
+    list_id: str,
     attributes: tuple[tuple[str, str], ...],
     endpoint: str,
 ) -> str:
@@ -422,6 +431,8 @@ def _component_type(
         return "composant JavaScript date / période"
     if tag_name == "select":
         return "select HTML classique"
+    if list_id:
+        return "input avec datalist"
     if aria_autocomplete in {"list", "both", "inline"} or any(
         marker in classes for marker in ("autocomplete", "typeahead", "ui-autocomplete")
     ):
@@ -435,6 +446,25 @@ def _component_type(
     if html_type in {"date", "datetime-local", "month", "week"}:
         return "champ date HTML"
     return "contrôle HTML / ARIA"
+
+
+def _css_selector(tag_name: str, element_id: str, name: str, role: str) -> str:
+    def quoted(value: str) -> str:
+        escaped = "".join(
+            f"\\{ord(char):x} " if ord(char) < 0x20 or ord(char) == 0x7F
+            else f"\\{char}" if char in {"\\", '"'}
+            else char
+            for char in value
+        )
+        return f'"{escaped}"'
+
+    if element_id:
+        return f"[id={quoted(element_id)}]"
+    if name:
+        return f"{tag_name}[name={quoted(name)}]"
+    if role:
+        return f"[role={quoted(role)}]"
+    return tag_name
 
 
 def _build_field(item: dict[str, Any]) -> FormFieldDiagnostic | None:
@@ -457,13 +487,17 @@ def _build_field(item: dict[str, Any]) -> FormFieldDiagnostic | None:
     aria_autocomplete = _safe_attribute("aria_autocomplete", item.get("aria_autocomplete"), 40).lower()
     endpoint, endpoint_method = _endpoint_details(data_attributes, frame_url)
     tag_name = _safe_attribute("tag", item.get("tag_name"), 40) or native_tag
+    safe_name = _safe_attribute("name", name_raw, 100)
+    element_id = _safe_attribute("id", item.get("id"), 100)
+    list_id = _safe_attribute("list", item.get("list_id"), 100)
+    css_selector = _css_selector(tag_name, element_id, safe_name, role)
     return FormFieldDiagnostic(
         label=label,
         associated_text=associated,
         html_type=html_type or "inconnu",
         role=role or "non défini",
-        name=_safe_attribute("name", name_raw, 100),
-        element_id=_safe_attribute("id", item.get("id"), 100),
+        name=safe_name,
+        element_id=element_id,
         placeholder=_safe_attribute("placeholder", item.get("placeholder"), 120),
         data_attributes=data_attributes,
         disabled=bool(item.get("disabled", False)),
@@ -479,9 +513,13 @@ def _build_field(item: dict[str, Any]) -> FormFieldDiagnostic | None:
         frame_url=frame_url,
         class_name=class_name,
         required=bool(item.get("required", False)),
+        readonly=bool(item.get("readonly", False)),
+        list_id=list_id,
+        css_selector=css_selector,
         aria_autocomplete=aria_autocomplete,
         component_type=_component_type(
-            tag_name, html_type, role or "", class_name, aria_autocomplete, data_attributes, endpoint
+            tag_name, html_type, role or "", class_name, aria_autocomplete,
+            list_id, data_attributes, endpoint
         ),
         ajax_endpoint=endpoint,
         ajax_method=endpoint_method,
@@ -546,12 +584,15 @@ def _format_field(field: FormFieldDiagnostic) -> list[str]:
         f"Role : {field.role}",
         f"Name : {field.name or '—'}",
         f"ID : {field.element_id or '—'}",
+        f"Sélecteur CSS : {field.css_selector or '—'}",
         f"Class : {field.class_name or '—'}",
+        f"Liste associée : {field.list_id or '—'}",
         f"Placeholder : {field.placeholder or '—'}",
         f"aria-label : {field.aria_label or '—'}",
         f"aria-labelledby : {field.aria_labelledby or '—'}",
         f"aria-autocomplete : {field.aria_autocomplete or '—'}",
         f"Required : {'oui' if field.required else 'non'}",
+        f"Readonly : {'oui' if field.readonly else 'non'}",
         f"Disabled : {'oui' if field.disabled else 'non'}",
         f"Visible : {'oui' if field.visible else 'non'}",
         f"Hiérarchie DOM : {' > '.join(field.hierarchy) or '—'}",
@@ -628,14 +669,23 @@ def format_diagnostic(page: Any, bundle: FormDiagnosticBundle | None = None) -> 
             f"formulaires : {frame.form_count} · contrôles : {frame.control_count}"
         )
 
+    portlet_scopes = getattr(page, "portlet_scopes", ())
+    if portlet_scopes:
+        lines.extend(("", "PORTLET PARENT"))
+        for frame_name, tag_name, element_id, class_name in portlet_scopes:
+            lines.append(
+                f"Frame : {frame_name} · Tag : {tag_name or '—'} · "
+                f"ID : {element_id or '—'} · Class : {class_name or '—'}"
+            )
+
     lines.extend(("", "FORMULAIRES"))
     if not bundle.forms:
         lines.append("Aucun formulaire repéré.")
     for form_index, form in enumerate(bundle.forms, start=1):
         lines.extend(("", f"Formulaire {form_index} : {form.title} · Frame : {form.frame_name}"))
         lines.append(
-            f"ID : {form.element_id or '—'} · Action : {form.action or 'implicite (page courante)'} · "
-            f"Méthode : {form.method}"
+            f"ID : {form.element_id or '—'} · Name : {form.name or '—'} · "
+            f"Action : {form.action or 'implicite (page courante)'} · Méthode : {form.method}"
         )
         if form.frame_url:
             lines.append(f"URL frame : {form.frame_url}")
@@ -693,13 +743,45 @@ def format_search_mode_comparison(
     changed: list[str] = []
     for key in sorted(physical_fields.keys() & legal_fields.keys()):
         left, right = physical_fields[key], legal_fields[key]
-        left_signature = (left.tag_name, left.html_type, left.required, left.options, left.component_type)
-        right_signature = (right.tag_name, right.html_type, right.required, right.options, right.component_type)
+        left_signature = (
+            left.tag_name, left.html_type, left.role, left.element_id, left.class_name,
+            left.required, left.readonly, left.list_id, left.options, left.component_type,
+            left.ajax_endpoint, left.ajax_method, left.data_attributes,
+        )
+        right_signature = (
+            right.tag_name, right.html_type, right.role, right.element_id, right.class_name,
+            right.required, right.readonly, right.list_id, right.options, right.component_type,
+            right.ajax_endpoint, right.ajax_method, right.data_attributes,
+        )
         if left_signature != right_signature:
-            changed.append(
-                f"{left.label or key} : {left.tag_name}/{left.html_type}, options={', '.join(left.options) or '—'}"
-                f" → {right.tag_name}/{right.html_type}, options={', '.join(right.options) or '—'}"
-            )
+            def field_summary(field: FormFieldDiagnostic) -> str:
+                return (
+                    f"{field.tag_name}/{field.html_type}, name={field.name or '—'}, "
+                    f"id={field.element_id or '—'}, selector={field.css_selector or '—'}, "
+                    f"class={field.class_name or '—'}, role={field.role}, "
+                    f"required={field.required}, readonly={field.readonly}, "
+                    f"component={field.component_type or '—'}, endpoint={field.ajax_endpoint or '—'} "
+                    f"{field.ajax_method or ''}, data={_format_attributes(field.data_attributes)}, "
+                    f"options={', '.join(field.options) or '—'}"
+                )
+            changed.append(f"{left.label or key} : {field_summary(left)} → {field_summary(right)}")
+
+    def button_signature(button: ButtonDiagnostic) -> tuple[str, ...]:
+        return (
+            button.text, button.tag_name, button.html_type, button.name, button.element_id,
+            button.class_name, button.role, str(button.disabled), button.form_id,
+            button.form_action, button.form_method,
+        )
+
+    physical_button_set = {button_signature(button) for button in physical.buttons}
+    legal_button_set = {button_signature(button) for button in legal.buttons}
+    def render_button_signature(signature: tuple[str, ...]) -> str:
+        text, tag, html_type, name, element_id, class_name, role, disabled, form_id, action, method = signature
+        return (
+            f"{text or '—'} [{tag}/{html_type}; name={name or '—'}; id={element_id or '—'}; "
+            f"class={class_name or '—'}; role={role or '—'}; disabled={disabled}; "
+            f"form={form_id or '—'}; {method or '—'} {action or '—'}]"
+        )
 
     lines = [
         "COMPARAISON DES MODES (métadonnées seulement)",
@@ -708,14 +790,22 @@ def format_search_mode_comparison(
         f"Personnes morales : {len(legal_fields)} contrôle(s) recensé(s), {len(legal.buttons)} bouton(s), "
         f"{len(legal.forms)} formulaire(s).",
         "Structure physique : " + ("; ".join(
-            f"{form.element_id or '—'} [{form.method} · {form.action or 'action implicite'}]" for form in physical.forms
+            f"id={form.element_id or '—'}, name={form.name or '—'} "
+            f"[{form.method} · {form.action or 'action implicite'}]" for form in physical.forms
         ) or "aucun formulaire identifié"),
         "Structure morale : " + ("; ".join(
-            f"{form.element_id or '—'} [{form.method} · {form.action or 'action implicite'}]" for form in legal.forms
+            f"id={form.element_id or '—'}, name={form.name or '—'} "
+            f"[{form.method} · {form.action or 'action implicite'}]" for form in legal.forms
         ) or "aucun formulaire identifié"),
         "Spécifiques physiques : " + (", ".join(physical_only) or "aucun"),
         "Spécifiques morales : " + (", ".join(legal_only) or "aucun"),
         "Métadonnées différentes : " + ("; ".join(changed) or "aucune différence détectée"),
+        "Boutons spécifiques physiques : " + (
+            "; ".join(render_button_signature(item) for item in sorted(physical_button_set - legal_button_set)) or "aucun"
+        ),
+        "Boutons spécifiques morales : " + (
+            "; ".join(render_button_signature(item) for item in sorted(legal_button_set - physical_button_set)) or "aucun"
+        ),
     ]
     def matching_buttons(bundle: FormDiagnosticBundle, pattern: re.Pattern[str]) -> str:
         matches = [button for button in bundle.buttons if pattern.search(button.text)]
@@ -744,8 +834,8 @@ class _FixtureHTMLParser(HTMLParser):
 
     _ALLOWED_ATTRIBUTES = frozenset(
         {
-            "id", "name", "type", "role", "placeholder", "aria-label", "aria-labelledby", "for", "href",
-            "title", "disabled", "aria-disabled", "aria-hidden", "aria-autocomplete", "aria-required", "hidden", "checked", "selected", "multiple", "required", "tabindex",
+            "id", "name", "type", "role", "placeholder", "aria-label", "aria-labelledby", "aria-readonly", "for", "href",
+            "title", "disabled", "aria-disabled", "aria-hidden", "aria-autocomplete", "aria-required", "hidden", "checked", "selected", "multiple", "required", "readonly", "list", "tabindex",
             "contenteditable", "class", "src", "action", "method", "formaction", "formmethod", "onclick", "data-testid",
             "data-test", "data-qa", "data-cy", "data-field", "data-field-name", "data-role",
         }
@@ -761,8 +851,9 @@ class _FixtureHTMLParser(HTMLParser):
         self.form_id = "hors-formulaire"
         self.form_action = ""
         self.form_method = "GET"
+        self.form_name = ""
         self.form_index = 0
-        self.form_stack: list[tuple[str, str, str, str]] = []
+        self.form_stack: list[tuple[str, str, str, str, str]] = []
         self.fieldsets: list[dict[str, str]] = []
         self._active_label: dict[str, Any] | None = None
         self._active_legend: dict[str, Any] | None = None
@@ -812,16 +903,18 @@ class _FixtureHTMLParser(HTMLParser):
         attr_names = {key for key, _value in attrs}
         role = safe.get("role", "").casefold()
         if tag == "form":
-            self.form_stack.append((self.form_id, self.form_title, self.form_action, self.form_method))
+            self.form_stack.append((self.form_id, self.form_title, self.form_action, self.form_method, self.form_name))
             self.form_index += 1
             self.form_id = safe.get("id") or f"formulaire-{self.form_index}"
             self.form_title = safe.get("aria-label") or safe.get("title") or self.form_id or "Formulaire"
             self.form_action = safe.get("action", "")
             self.form_method = safe.get("method", "GET")
+            self.form_name = safe.get("name", "")
             self.raw["form_entries"].append(
                 {
                     "form_id": self.form_id,
                     "form_title": self.form_title,
+                    "form_name": self.form_name,
                     "action": self.form_action,
                     "method": self.form_method,
                 }
@@ -879,15 +972,18 @@ class _FixtureHTMLParser(HTMLParser):
                     "aria_label": safe.get("aria-label", ""),
                     "aria_labelledby": safe.get("aria-labelledby", ""),
                     "aria_autocomplete": safe.get("aria-autocomplete", ""),
+                    "list_id": safe.get("list", ""),
                     "placeholder": safe.get("placeholder", ""),
                     "data_attributes": {key: value for key, value in safe.items() if key.startswith("data-")},
                     "required": "required" in safe or safe.get("aria-required") == "true",
+                    "readonly": "readonly" in safe or safe.get("aria-readonly") == "true",
                     "disabled": "disabled" in safe or safe.get("aria-disabled") == "true",
                     "visible": "hidden" not in safe and safe.get("aria-hidden") != "true",
                     "option_count": 0,
                     "options": [],
                     "form_id": self.form_id,
                     "form_title": self.form_title,
+                    "form_name": self.form_name,
                     "form_action": self.form_action,
                     "form_method": self.form_method,
                     "hierarchy": [item["legend"] for item in self.fieldsets if item["legend"]],
@@ -938,7 +1034,7 @@ class _FixtureHTMLParser(HTMLParser):
             self._active_button = None
             self._active_button_depth = max(0, self._active_button_depth - 1)
         elif tag == "form" and self.form_stack:
-            self.form_id, self.form_title, self.form_action, self.form_method = self.form_stack.pop()
+            self.form_id, self.form_title, self.form_action, self.form_method, self.form_name = self.form_stack.pop()
 
     def handle_data(self, data: str) -> None:
         if self._active_label is not None:

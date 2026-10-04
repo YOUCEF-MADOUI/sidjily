@@ -82,6 +82,25 @@ class DiagnosticFixtureTests(unittest.TestCase):
         self.assertNotIn("TOKEN-SECRET", rendered)
         self.assertNotIn("value", repr(bundle).casefold())
 
+    def test_readonly_datalist_and_form_name_metadata_are_reported(self) -> None:
+        bundle = diagnostics_from_html_fixture(
+            '<form id="criteria-form" name="criteria_filter">'
+            '<label for="activity">Activité</label>'
+            '<input id="activity" name="activity" list="activity-options" readonly>'
+            '<datalist id="activity-options"><option label="Commerce"></datalist></form>'
+        )
+        form = bundle.forms[0]
+        field = form.fields[0]
+        self.assertEqual(form.name, "criteria_filter")
+        self.assertTrue(field.readonly)
+        self.assertEqual(field.list_id, "activity-options")
+        self.assertEqual(field.component_type, "input avec datalist")
+        self.assertEqual(field.css_selector, '[id="activity"]')
+        report = format_diagnostic(SimpleNamespace(title="Fixture", section="Test", url=DEFAULT_SIDJILCOM_URL), bundle)
+        self.assertIn("Name : criteria_filter", report)
+        self.assertIn("Readonly : oui", report)
+        self.assertIn('Sélecteur CSS : [id="activity"]', report)
+
     def test_sensitive_select_option_text_is_withheld(self) -> None:
         bundle = diagnostics_from_html_fixture(
             '<form><label for="email">Adresse e-mail</label><select id="email" name="email">'
@@ -237,8 +256,15 @@ class BrowserDiagnosticMockTests(unittest.TestCase):
         script = main_frame.script
         self.assertNotIn("element.value", script)
         self.assertNotIn("getAttribute('value')", script)
+        self.assertNotIn("option.value", script)
         self.assertIn("getAttribute('type')", script)
         self.assertIn("required: !!element.required", script)
+        self.assertIn("readonly: !!element.readOnly", script)
+        self.assertIn("list_id: listId", script)
+        self.assertIn("dataList?.options.length", script)
+        self.assertIn("aria-readonly", script)
+        self.assertIn("form_name: form.name", script)
+        self.assertIn("scope_info: scopeInfo", script)
         self.assertIn("form_action: form.action", script)
         self.assertIn("form.getAttribute('method')", script)
         self.assertIn("onclick_present", script)
@@ -297,7 +323,8 @@ class _ModeFrame:
         self.snapshots = {
             "PERSONNES PHYSIQUES": {
                 "scope_found": True,
-                "forms": [{"form_id": "physical", "form_title": "Recherche physique", "method": "POST"}],
+                "scope_info": {"tag_name": "div", "id": "physical-portlet", "class_name": "RechercheDetailleePortlet"},
+                "forms": [{"form_id": "physical", "form_name": "physical_form", "form_title": "Recherche physique", "method": "POST"}],
                 "fields": [{"label": "Numéro d'inscription", "name": "registration_number", "id": "physical-id",
                             "html_type": "text", "required": True, "form_id": "physical",
                             "form_title": "Recherche physique"}],
@@ -306,7 +333,8 @@ class _ModeFrame:
             },
             "PERSONNES MORALES": {
                 "scope_found": True,
-                "forms": [{"form_id": "legal", "form_title": "Recherche morale", "method": "GET"}],
+                "scope_info": {"tag_name": "div", "id": "legal-portlet", "class_name": "RechercheDetailleePortlet"},
+                "forms": [{"form_id": "legal", "form_name": "legal_form", "form_title": "Recherche morale", "method": "GET"}],
                 "fields": [{"label": "Raison sociale", "name": "company_name", "id": "legal-id",
                             "html_type": "text", "required": True, "form_id": "legal",
                             "form_title": "Recherche morale"}],
@@ -351,6 +379,9 @@ class SearchModeAnalysisTests(unittest.TestCase):
         self.assertEqual(frame.portlet_only_flags, [True, True])
         self.assertIn("===== PERSONNES PHYSIQUES =====", result.report)
         self.assertIn("===== PERSONNES MORALES =====", result.report)
+        self.assertIn("PORTLET PARENT", result.report)
+        self.assertIn("physical-portlet", result.report)
+        self.assertIn("Name : physical_form", result.report)
         self.assertIn("Spécifiques physiques : registration_number", result.report)
         self.assertIn("Spécifiques morales : company_name", result.report)
         self.assertIn("aucun bouton de recherche activé", result.report)
@@ -519,6 +550,10 @@ class DiagnosticDOMFixtureTests(unittest.TestCase):
         self.assertIn("Commerce de détail", physical_fields["physical-activity"].options)
         self.assertEqual(physical_fields["physical-commune"].component_type, "autocomplete / liste dynamique")
         self.assertTrue(physical_fields["physical-commune"].required)
+        self.assertIn(
+            ("data-dependent-on", "physical-wilaya"),
+            physical_fields["physical-commune"].data_attributes,
+        )
         self.assertNotIn(("data-value", "PRIVATE QUERY"), physical_fields["physical-commune"].data_attributes)
         self.assertEqual(physical.forms[0].method, "POST")
         self.assertEqual(physical.forms[0].action, "https://sidjilcom.cnrc.dz/fr/search/physical")
@@ -545,7 +580,7 @@ class DiagnosticDOMFixtureTests(unittest.TestCase):
         self.assertIn("COMPARAISON DES MODES", report)
         self.assertIn("Spécifiques physiques", report)
         self.assertIn("Spécifiques morales", report)
-        self.assertIn("physical-search [POST · https://sidjilcom.cnrc.dz/fr/search/physical]", report)
+        self.assertIn("id=physical-search, name=— [POST · https://sidjilcom.cnrc.dz/fr/search/physical]", report)
         self.assertIn("Bouton(s) Rechercher physiques : Rechercher", report)
         self.assertIn("Bouton(s) Réinitialiser physiques : Réinitialiser", report)
         complete_report = "\n".join(
