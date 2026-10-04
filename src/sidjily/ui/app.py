@@ -7,7 +7,7 @@ from tkinter import messagebox, ttk
 from typing import Any
 
 from sidjily.models import Search, Status
-from sidjily.sidjilcom.session import SessionState, SidjilcomSessionManager
+from sidjily.sidjilcom.session import SessionOperationError, SessionState, SidjilcomSessionManager
 from sidjily.task_manager import InvalidTransition, TaskManager
 
 
@@ -42,6 +42,7 @@ class SidjilyApp:
         self.root = root
         self.manager = manager
         self.session_manager = session_manager or SidjilcomSessionManager()
+        self._pending_session_operation: Any = None
         self._closing = False
         self.root.title("SIDJILY — Gestion des recherches")
         self.root.geometry("940x600")
@@ -73,7 +74,7 @@ class SidjilyApp:
         session_buttons = ttk.Frame(session_panel)
         session_buttons.pack(side="right", padx=(10, 0))
         self.connect_button = ttk.Button(
-            session_buttons, text="Se connecter à Sidjilcom", command=self._connect_sidjilcom
+            session_buttons, text="Ouvrir Sidjilcom", command=self._connect_sidjilcom
         )
         self.connect_button.pack(side="left")
         self.verify_button = ttk.Button(
@@ -84,6 +85,34 @@ class SidjilyApp:
             session_buttons, text="Déconnecter", command=self._disconnect_sidjilcom
         )
         self.disconnect_button.pack(side="left")
+
+        navigation_panel = ttk.LabelFrame(container, text="Validation de navigation (sans recherche)", padding=8)
+        navigation_panel.pack(fill="x", pady=(0, 12))
+        navigation_buttons = ttk.Frame(navigation_panel)
+        navigation_buttons.pack(fill="x")
+        self.home_button = ttk.Button(
+            navigation_buttons, text="Accueil Sidjilcom", command=self._go_home
+        )
+        self.home_button.pack(side="left")
+        self.dashboard_button = ttk.Button(
+            navigation_buttons, text="Tableau de bord", command=self._open_dashboard
+        )
+        self.dashboard_button.pack(side="left", padx=8)
+        self.enterprise_search_button = ttk.Button(
+            navigation_buttons, text="Trouver une entreprise", command=self._open_enterprise_search
+        )
+        self.enterprise_search_button.pack(side="left", padx=8)
+        self.diagnostics_button = ttk.Button(
+            navigation_buttons, text="Diagnostiquer la page", command=self._diagnose_page
+        )
+        self.diagnostics_button.pack(side="left")
+        self.diagnostic_output = ttk.Label(
+            navigation_panel,
+            text="Aucun diagnostic. Cette étape ne lance aucune recherche.",
+            wraplength=880,
+            justify="left",
+        )
+        self.diagnostic_output.pack(anchor="w", pady=(6, 0))
 
         toolbar = ttk.Frame(container)
         toolbar.pack(fill="x", pady=(0, 10))
@@ -207,6 +236,52 @@ class SidjilyApp:
         self.session_manager.disconnect()
         self._refresh_session_status()
 
+    def _go_home(self) -> None:
+        self._request_session_operation(self.session_manager.go_home(), "Retour à l'accueil")
+
+    def _open_dashboard(self) -> None:
+        self._request_session_operation(self.session_manager.open_dashboard(), "Ouverture du tableau de bord")
+
+    def _open_enterprise_search(self) -> None:
+        self._request_session_operation(
+            self.session_manager.open_enterprise_search(), "Ouverture de Trouver une entreprise"
+        )
+
+    def _diagnose_page(self) -> None:
+        self._request_session_operation(self.session_manager.diagnose_page(), "Diagnostic de la page")
+
+    def _request_session_operation(self, future: Any, label: str) -> None:
+        if self._pending_session_operation is not None and not self._pending_session_operation.done():
+            return
+        self._pending_session_operation = future
+        self.diagnostic_output.configure(text=f"{label}…")
+        self._refresh_session_status()
+
+    def _consume_session_operation(self) -> None:
+        future = self._pending_session_operation
+        if future is None or not future.done():
+            return
+        self._pending_session_operation = None
+        try:
+            result = future.result()
+        except SessionOperationError as exc:
+            self.diagnostic_output.configure(text=str(exc))
+        except Exception:
+            self.diagnostic_output.configure(text="Diagnostic impossible; consultez l'état du navigateur et du réseau.")
+        else:
+            page = result.page
+            state_label = SESSION_LABELS[result.state][0]
+            nav = ", ".join(f"{item.label}: {item.url}" for item in page.navigation_items) or "aucun lien reconnu"
+            fields = ", ".join(page.visible_fields[:24]) or "aucun champ visible identifié"
+            self.diagnostic_output.configure(
+                text=(
+                    f"État : {state_label} · "
+                    f"Section : {page.section}\nURL : {page.url}\nTitre : {page.title or '—'}\n"
+                    f"Navigation reconnue : {nav}\nChamps visibles (libellés uniquement) : {fields}"
+                )
+            )
+        self._refresh_session_status()
+
     def _refresh_session_status(self) -> None:
         snapshot = self.session_manager.snapshot
         label, color = SESSION_LABELS[snapshot.state]
@@ -219,9 +294,20 @@ class SidjilyApp:
         )
         self.verify_button.configure(state="normal" if running and not busy else "disabled")
         self.disconnect_button.configure(state="normal" if running and not busy else "disabled")
+        operation_pending = (
+            self._pending_session_operation is not None
+            and not self._pending_session_operation.done()
+        )
+        navigation_enabled = running and not busy and not operation_pending and snapshot.state != SessionState.ERROR
+        state = "normal" if navigation_enabled else "disabled"
+        self.home_button.configure(state=state)
+        self.dashboard_button.configure(state=state)
+        self.enterprise_search_button.configure(state=state)
+        self.diagnostics_button.configure(state=state)
 
     def _poll_session(self) -> None:
         self._refresh_session_status()
+        self._consume_session_operation()
         if not self._closing:
             self.root.after(500, self._poll_session)
 

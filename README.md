@@ -40,7 +40,7 @@ Sur Linux, installez également le paquet système Tkinter (`python3-tk`) si né
 
 ## Connexion manuelle
 
-Dans la zone **Connexion Sidjilcom**, sélectionnez **Se connecter à Sidjilcom**. Une fenêtre Chromium visible s'ouvre sur `https://sidjilcom.cnrc.dz/`. Connectez-vous vous-même; l'application ne voit ni ne conserve les valeurs des champs d'identifiants. Le contexte persistant dédié est enregistré dans le répertoire de données utilisateur :
+Dans la zone **Connexion Sidjilcom**, sélectionnez **Ouvrir Sidjilcom**. Une fenêtre Chromium visible s'ouvre sur `https://sidjilcom.cnrc.dz/`. Connectez-vous vous-même; l'application ne lit pas les valeurs des champs d'identifiants. Le contexte persistant dédié est enregistré dans le répertoire de données utilisateur :
 
 - Windows : `%LOCALAPPDATA%\SIDJILY\browser_profile`
 - Linux : `$XDG_DATA_HOME/SIDJILY/browser_profile` ou `~/.local/share/SIDJILY/browser_profile`
@@ -48,6 +48,8 @@ Dans la zone **Connexion Sidjilcom**, sélectionnez **Se connecter à Sidjilcom*
 La session demeure locale. **Ne partagez pas ce dossier** : il contient l'état d'authentification du navigateur. Le bouton **Déconnecter** ferme le navigateur et conserve ce profil pour le prochain lancement; il n'effectue pas de déconnexion du portail. Une reconnexion exigée par Sidjilcom est signalée à l'écran. Un fichier marqueur vide, sans identifiant ni jeton, permet de reconnaître après redémarrage qu'une connexion avait déjà réussi.
 
 Les recherches et les journaux restent dans `sidjily.sqlite3` et `logs/` sous le même répertoire de données. Aucun mot de passe Sidjilcom n'est enregistré dans SQLite ou les journaux.
+
+Après ouverture du navigateur, utilisez **Diagnostiquer la page**, **Accueil Sidjilcom**, **Tableau de bord** et **Trouver une entreprise** pour valider la navigation. Le diagnostic affiche URL assainie, titre, section, liens connus et libellés/types des champs visibles; il ne lit aucune valeur de champ. L'étape s'arrête sur la page de recherche : aucun critère n'est rempli ni aucune recherche soumise. Les routes et limites effectivement observées sont décrites dans [docs/sidjilcom-navigation.md](docs/sidjilcom-navigation.md).
 
 ## Configuration navigateur
 
@@ -73,6 +75,7 @@ Les tests de session injectent un navigateur simulé et n'ont besoin ni d'un com
 - Interface française : tâches locales et état de connexion Sidjilcom.
 - SQLite versionnée, journalisation et reprise des tâches interrompues (socle précédent).
 - Session persistante manuelle dans un profil Chromium SIDJILY dédié, avec détection prudente de connexion et d'expiration.
-- Aucune recherche, extraction, subdivision des résultats, export ou IA à ce stade.
+- Navigation de validation vers l'accueil, le tableau de bord et « Trouver une entreprise »; diagnostic des libellés visibles sans leurs valeurs.
+- Aucune recherche n'est soumise; aucune extraction, subdivision des résultats, export ou IA à ce stade.
 
-Voir [docs/architecture.md](docs/architecture.md) pour les responsabilités et les limites de détection de session.
+Voir [docs/architecture.md](docs/architecture.md) et [docs/sidjilcom-navigation.md](docs/sidjilcom-navigation.md) pour les responsabilités, les routes relevées et les limites de validation.

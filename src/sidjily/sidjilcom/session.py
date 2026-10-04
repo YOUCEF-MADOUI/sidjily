@@ -5,11 +5,12 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+from concurrent.futures import Future
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
 
-from sidjily.sidjilcom.browser import BrowserAdapter, PlaywrightBrowser
+from sidjily.sidjilcom.browser import BrowserAdapter, PageDiagnostics, PlaywrightBrowser
 from sidjily.sidjilcom.config import SessionConfig
 from sidjily.sidjilcom.selectors import PageEvidence
 
@@ -30,11 +31,60 @@ class SessionSnapshot:
     message: str
 
 
+@dataclass(frozen=True, slots=True)
+class SessionDiagnostics:
+    state: SessionState
+    page: PageDiagnostics
+
+
+class SessionOperationError(RuntimeError):
+    """Erreur de session/navigation dont le message ne contient aucune donnée de page."""
+
+
+class SessionNotConnected(SessionOperationError):
+    def __init__(self) -> None:
+        super().__init__("Session non confirmée. Connectez-vous dans le navigateur puis réessayez.")
+
+
+class SessionExpiredError(SessionOperationError):
+    def __init__(self) -> None:
+        super().__init__("Votre session Sidjilcom a expiré. Veuillez vous reconnecter.")
+
+
+class NavigationElementNotFound(SessionOperationError):
+    def __init__(self) -> None:
+        super().__init__("L'élément de navigation demandé n'a pas été identifié sur la page.")
+
+
+class NavigationPageIncomplete(SessionOperationError):
+    def __init__(self) -> None:
+        super().__init__("La page est ouverte, mais son contenu attendu ou ses champs visibles ne sont pas détectés.")
+
+
+class NavigationFailed(SessionOperationError):
+    def __init__(self) -> None:
+        super().__init__("Navigation impossible. Vérifiez le réseau et l'état de la page Sidjilcom.")
+
+
+@dataclass(slots=True)
+class _SessionCommand:
+    name: str
+    future: Future[SessionDiagnostics]
+
+
 def classify_session(evidence: PageEvidence, *, previously_connected: bool) -> SessionState:
     """Retourne un état conservateur : aucun marqueur positif, aucun faux « connecté »."""
     if evidence.has_expired_notice or (previously_connected and evidence.has_login_form):
         return SessionState.SESSION_EXPIRED
-    if evidence.on_portal and evidence.has_authenticated_marker and not evidence.has_login_form:
+    if (
+        evidence.on_portal
+        and (
+            evidence.has_authenticated_marker
+            or evidence.on_enterprise_search_page
+            or evidence.on_dashboard_page
+        )
+        and not evidence.has_login_form
+    ):
         return SessionState.CONNECTED
     return SessionState.WAITING_FOR_LOGIN
 
@@ -67,7 +117,7 @@ class SidjilcomSessionManager:
         self._browser_factory = browser_factory
         self._logger = logger or logging.getLogger("sidjily.session")
         self._lock = threading.RLock()
-        self._commands: queue.Queue[str] = queue.Queue()
+        self._commands: queue.Queue[str | _SessionCommand] = queue.Queue()
         self._disconnect_requested = threading.Event()
         self._thread: threading.Thread | None = None
         self._snapshot = SessionSnapshot(SessionState.DISCONNECTED, self._MESSAGES[SessionState.DISCONNECTED])
@@ -90,6 +140,7 @@ class SidjilcomSessionManager:
                 if self._snapshot.state == SessionState.SESSION_EXPIRED:
                     self._commands.put("verify")
                 return
+            self._cancel_queued_operations()
             while True:
                 try:
                     self._commands.get_nowait()
@@ -112,6 +163,33 @@ class SidjilcomSessionManager:
                 return
             self._commands.put("verify")
 
+    def go_home(self) -> Future[SessionDiagnostics]:
+        """Revenir à l'accueil Sidjilcom dans le navigateur actif."""
+        return self._submit_operation("home")
+
+    def open_dashboard(self) -> Future[SessionDiagnostics]:
+        """Ouvrir le tableau de bord des abonnés, sans lancer d'action métier."""
+        return self._submit_operation("dashboard")
+
+    def open_enterprise_search(self) -> Future[SessionDiagnostics]:
+        """Ouvrir « Trouver une entreprise »; aucun formulaire n'est soumis."""
+        return self._submit_operation("enterprise_search")
+
+    def diagnose_page(self) -> Future[SessionDiagnostics]:
+        """Récupérer des métadonnées non sensibles de la page courante."""
+        return self._submit_operation("diagnostics")
+
+    def _submit_operation(self, name: str) -> Future[SessionDiagnostics]:
+        future: Future[SessionDiagnostics] = Future()
+        with self._lock:
+            if self._thread is None or not self._thread.is_alive():
+                future.set_exception(SessionOperationError("Ouvrez d'abord Sidjilcom dans le navigateur SIDJILY."))
+            elif self._snapshot.state in (SessionState.DISCONNECTING, SessionState.ERROR):
+                future.set_exception(SessionOperationError("Le navigateur Sidjilcom n'est pas disponible."))
+            else:
+                self._commands.put(_SessionCommand(name, future))
+        return future
+
     def disconnect(self) -> None:
         """Ferme le contexte Chromium en conservant sur disque le profil SIDJILY."""
         with self._lock:
@@ -131,6 +209,15 @@ class SidjilcomSessionManager:
             thread.join(timeout=max(timeout, 0.0))
         return not self.is_running
 
+    def _cancel_queued_operations(self) -> None:
+        while True:
+            try:
+                pending = self._commands.get_nowait()
+            except queue.Empty:
+                return
+            if isinstance(pending, _SessionCommand) and not pending.future.done():
+                pending.future.set_exception(SessionOperationError("Session fermée avant la fin de l'opération."))
+
     def _run_browser(self) -> None:
         browser: BrowserAdapter | None = None
         failure: Exception | None = None
@@ -145,7 +232,9 @@ class SidjilcomSessionManager:
                     command = "poll"
                 if command == "disconnect" or self._disconnect_requested.is_set():
                     break
-                if command in ("poll", "verify"):
+                if isinstance(command, _SessionCommand):
+                    self._execute_command(browser, command)
+                elif command in ("poll", "verify"):
                     self._check_page(browser)
         except Exception as exc:  # détails volontairement exclus des logs et de l'interface
             failure = exc
@@ -163,12 +252,68 @@ class SidjilcomSessionManager:
                     self._logger.error("Échec de fermeture du navigateur (type=%s).", type(exc).__name__)
                     if failure is None and not self._disconnect_requested.is_set():
                         self._set_state(SessionState.ERROR)
+            self._cancel_queued_operations()
             with self._lock:
                 if self._disconnect_requested.is_set():
                     self._previously_connected = False
                     self._set_state_locked(SessionState.DISCONNECTED)
                 if self._thread is threading.current_thread():
                     self._thread = None
+
+    def _execute_command(self, browser: BrowserAdapter, command: _SessionCommand) -> None:
+        try:
+            if command.name == "home":
+                browser.go_home(self.config)
+            elif command.name == "dashboard":
+                browser.navigate_to_dashboard(self.config)
+            elif command.name == "enterprise_search":
+                browser.navigate_to_enterprise_search(self.config)
+            elif command.name != "diagnostics":
+                raise SessionOperationError("Commande de navigation inconnue.")
+
+            evidence = browser.inspect(self.config)
+            with self._lock:
+                was_connected = self._previously_connected
+            state = classify_session(evidence, previously_connected=was_connected)
+            newly_connected = False
+            with self._lock:
+                if state == SessionState.CONNECTED:
+                    newly_connected = not self._previously_connected
+                    self._previously_connected = True
+            if newly_connected:
+                self._persist_connected_marker()
+            self._set_state(state)
+            protected_navigation = command.name in ("dashboard", "enterprise_search")
+            if protected_navigation and state == SessionState.SESSION_EXPIRED:
+                raise SessionExpiredError()
+            page = browser.diagnostics(self.config)
+
+            expected_section = {
+                "dashboard": "Tableau de bord",
+                "enterprise_search": "Trouver une entreprise",
+            }.get(command.name)
+            if protected_navigation and state != SessionState.CONNECTED:
+                if page.section == expected_section:
+                    raise NavigationPageIncomplete()
+                raise SessionNotConnected()
+            if protected_navigation and page.section != expected_section:
+                raise NavigationElementNotFound()
+            if command.name == "enterprise_search" and not page.visible_fields:
+                raise NavigationPageIncomplete()
+            if not command.future.done():
+                command.future.set_result(SessionDiagnostics(state=state, page=page))
+        except SessionOperationError as exc:
+            if not command.future.done():
+                command.future.set_exception(exc)
+        except Exception as exc:
+            # Les URL, messages de page et détails d'erreur peuvent contenir des données privées.
+            self._logger.error("Échec de navigation Sidjilcom (type=%s).", type(exc).__name__)
+            self._set_state(
+                SessionState.ERROR,
+                "Navigation impossible. Vérifiez le réseau et l'état de la page Sidjilcom.",
+            )
+            if not command.future.done():
+                command.future.set_exception(NavigationFailed())
 
     def _check_page(self, browser: BrowserAdapter) -> None:
         evidence = browser.inspect(self.config)

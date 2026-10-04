@@ -11,8 +11,21 @@ from unittest.mock import patch
 
 from sidjily.paths import browser_profile_dir
 from sidjily.sidjilcom.config import DEFAULT_SIDJILCOM_URL, SessionConfig
-from sidjily.sidjilcom.selectors import PageEvidence, collect_page_evidence, is_portal_host
+from sidjily.sidjilcom.browser import NavigationItem, PageDiagnostics
+from sidjily.sidjilcom.selectors import (
+    DEFAULT_ENTERPRISE_SEARCH_ROUTE,
+    NAVIGATION_LABEL_PATTERNS,
+    PageEvidence,
+    collect_page_evidence,
+    identify_section,
+    is_portal_host,
+    sanitize_current_url,
+)
 from sidjily.sidjilcom.session import (
+    NavigationElementNotFound,
+    NavigationPageIncomplete,
+    SessionExpiredError,
+    SessionNotConnected,
     SessionState,
     SidjilcomSessionManager,
     classify_session,
@@ -31,6 +44,20 @@ class FakeBrowser:
         self.opened = threading.Event()
         self.closed = threading.Event()
         self.opened_with: SessionConfig | None = None
+        self.home_calls = 0
+        self.search_calls = 0
+        self.dashboard_calls = 0
+        self.navigation_evidence = PageEvidence(True, False, False, False, True)
+        self.dashboard_evidence = PageEvidence(True, False, False, False, False, True)
+        self.page_diagnostics = PageDiagnostics(
+            url=f"https://sidjilcom.cnrc.dz{DEFAULT_ENTERPRISE_SEARCH_ROUTE}",
+            title="Trouver une entreprise - Sidjilcom",
+            section="Trouver une entreprise",
+            navigation_items=(
+                NavigationItem("Trouver une entreprise", f"https://sidjilcom.cnrc.dz{DEFAULT_ENTERPRISE_SEARCH_ROUTE}"),
+            ),
+            visible_fields=("Raison Sociale / Nom commercial [text]",),
+        )
 
     def open(self, config: SessionConfig) -> None:
         self.opened_with = config
@@ -40,6 +67,27 @@ class FakeBrowser:
 
     def inspect(self, _config: SessionConfig) -> PageEvidence:
         return self.evidence
+
+    def go_home(self, _config: SessionConfig) -> None:
+        self.home_calls += 1
+
+    def navigate_to_enterprise_search(self, _config: SessionConfig) -> None:
+        self.search_calls += 1
+        self.evidence = self.navigation_evidence
+
+    def navigate_to_dashboard(self, _config: SessionConfig) -> None:
+        self.dashboard_calls += 1
+        self.evidence = self.dashboard_evidence
+        self.page_diagnostics = PageDiagnostics(
+            "https://sidjilcom.cnrc.dz/group/sidjilcom/mon-tableau-de-bord",
+            "Nos abonnés - Sidjilcom",
+            "Tableau de bord",
+            (NavigationItem("Tableau de bord", "https://sidjilcom.cnrc.dz/group/sidjilcom/mon-tableau-de-bord"),),
+            (),
+        )
+
+    def diagnostics(self, _config: SessionConfig) -> PageDiagnostics:
+        return self.page_diagnostics
 
     def close(self) -> None:
         self.closed.set()
@@ -100,6 +148,8 @@ class SessionDetectionTests(unittest.TestCase):
             is_portal_host("https://fake.sidjilcom.cnrc.dz/", DEFAULT_SIDJILCOM_URL)
         )
         self.assertFalse(is_portal_host("https://example.org/", DEFAULT_SIDJILCOM_URL))
+        self.assertFalse(is_portal_host("http://sidjilcom.cnrc.dz/", DEFAULT_SIDJILCOM_URL))
+        self.assertEqual(identify_section("https://login.example.org/login"), "Page externe")
 
     def test_absent_authenticated_evidence_stays_waiting_for_login(self) -> None:
         evidence = PageEvidence(True, True, False, False)
@@ -123,6 +173,50 @@ class SessionDetectionTests(unittest.TestCase):
         )
         self.assertTrue(evidence.has_login_form)
         self.assertEqual(classify_session(evidence, previously_connected=True), SessionState.SESSION_EXPIRED)
+
+    def test_semantic_navigation_patterns_match_observed_labels(self) -> None:
+        self.assertRegex("Trouver Une Entreprise", NAVIGATION_LABEL_PATTERNS["Trouver une entreprise"])
+        self.assertRegex("Recherche Commerçant Ambulant", NAVIGATION_LABEL_PATTERNS["Recherche Commerçant Ambulant"])
+        self.assertRegex("Nomenclature De Vos Activités", NAVIGATION_LABEL_PATTERNS["Nomenclature de vos activités"])
+
+    def test_observed_routes_and_safe_url_diagnostics(self) -> None:
+        self.assertEqual(identify_section("https://sidjilcom.cnrc.dz/"), "Accueil")
+        self.assertEqual(
+            identify_section(f"https://sidjilcom.cnrc.dz{DEFAULT_ENTERPRISE_SEARCH_ROUTE}"),
+            "Trouver une entreprise",
+        )
+        self.assertEqual(
+            identify_section("https://sidjilcom.cnrc.dz/fr/web/sidjilcom/nomenclature-de-vos-activites"),
+            "Nomenclature de vos activités",
+        )
+        self.assertEqual(
+            sanitize_current_url("https://sidjilcom.cnrc.dz/page?token=private#secret", DEFAULT_SIDJILCOM_URL),
+            "https://sidjilcom.cnrc.dz/page",
+        )
+        self.assertNotIn("private", sanitize_current_url("https://login.example.org/a?token=private", DEFAULT_SIDJILCOM_URL))
+
+    def test_dashboard_route_and_content_can_confirm_access(self) -> None:
+        evidence = collect_page_evidence(
+            current_url="https://sidjilcom.cnrc.dz/group/sidjilcom/mon-tableau-de-bord",
+            portal_url=DEFAULT_SIDJILCOM_URL,
+            visible_text="Nos abonnés — Tableau de bord",
+            has_password_field=False,
+            has_signout_control=False,
+        )
+        self.assertTrue(evidence.on_dashboard_page)
+        self.assertEqual(classify_session(evidence, previously_connected=False), SessionState.CONNECTED)
+
+    def test_authenticated_search_content_can_confirm_access_without_menu_marker(self) -> None:
+        evidence = collect_page_evidence(
+            current_url=f"https://sidjilcom.cnrc.dz{DEFAULT_ENTERPRISE_SEARCH_ROUTE}",
+            portal_url=DEFAULT_SIDJILCOM_URL,
+            visible_text="Raison Sociale / Nom commercial",
+            has_password_field=False,
+            has_signout_control=False,
+            has_visible_form_controls=True,
+        )
+        self.assertTrue(evidence.on_enterprise_search_page)
+        self.assertEqual(classify_session(evidence, previously_connected=False), SessionState.CONNECTED)
 
     def test_selector_layer_detects_french_and_arabic_expiration_without_page_text_leaks(self) -> None:
         for notice in (
@@ -210,6 +304,108 @@ class SessionManagerTests(unittest.TestCase):
             restarted_manager = self.make_manager(reauth_browser, temp_dir)
             restarted_manager.connect()
             self.wait_for_state(restarted_manager, SessionState.SESSION_EXPIRED)
+
+    def test_navigation_opens_enterprise_search_and_reports_fields_without_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser = FakeBrowser()
+            manager = self.make_manager(browser, temp_dir)
+            manager.connect()
+            self.assertTrue(browser.opened.wait(1))
+            report = manager.open_enterprise_search().result(timeout=1)
+            self.assertEqual(browser.search_calls, 1)
+            self.assertEqual(report.state, SessionState.CONNECTED)
+            self.assertEqual(report.page.section, "Trouver une entreprise")
+            self.assertIn("Raison Sociale", report.page.visible_fields[0])
+            self.assertTrue(manager.config.connected_marker_path.is_file())
+
+    def test_unauthenticated_redirect_is_reported_to_the_caller(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser = FakeBrowser()
+            browser.navigation_evidence = PageEvidence(True, True, False, False)
+            browser.page_diagnostics = PageDiagnostics(
+                "https://sidjilcom.cnrc.dz/web/sidjilcom/login",
+                "login - Sidjilcom",
+                "Authentification",
+                (),
+                ("Adresse e-mail [text]",),
+            )
+            manager = self.make_manager(browser, temp_dir)
+            manager.connect()
+            self.assertTrue(browser.opened.wait(1))
+            with self.assertRaises(SessionNotConnected):
+                manager.open_enterprise_search().result(timeout=1)
+            self.assertEqual(manager.snapshot.state, SessionState.WAITING_FOR_LOGIN)
+
+    def test_expired_session_during_navigation_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser = FakeBrowser()
+            browser.navigation_evidence = PageEvidence(True, True, False, False)
+            config = SessionConfig(
+                profile_path=Path(temp_dir) / "browser_profile", poll_interval_seconds=0.02
+            )
+            marker = config.connected_marker_path
+            marker.parent.mkdir(parents=True)
+            marker.touch()
+            manager = SidjilcomSessionManager(config, browser_factory=lambda: browser)
+            self.addCleanup(manager.close)
+            manager.connect()
+            self.assertTrue(browser.opened.wait(1))
+            with self.assertRaises(SessionExpiredError):
+                manager.open_enterprise_search().result(timeout=1)
+            self.assertEqual(manager.snapshot.state, SessionState.SESSION_EXPIRED)
+
+    def test_missing_navigation_element_is_reported_and_not_silenced(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser = FakeBrowser(PageEvidence(True, False, True, False))
+            browser.page_diagnostics = PageDiagnostics(
+                "https://sidjilcom.cnrc.dz/", "Accueil - Sidjilcom", "Accueil", (), ()
+            )
+            manager = self.make_manager(browser, temp_dir)
+            manager.connect()
+            self.assertTrue(browser.opened.wait(1))
+            with self.assertRaises(NavigationElementNotFound):
+                manager.open_enterprise_search().result(timeout=1)
+            self.assertEqual(manager.snapshot.state, SessionState.CONNECTED)
+
+    def test_incomplete_search_page_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser = FakeBrowser(PageEvidence(True, False, True, False))
+            browser.page_diagnostics = PageDiagnostics(
+                f"https://sidjilcom.cnrc.dz{DEFAULT_ENTERPRISE_SEARCH_ROUTE}",
+                "Trouver une entreprise - Sidjilcom",
+                "Trouver une entreprise",
+                (),
+                (),
+            )
+            manager = self.make_manager(browser, temp_dir)
+            manager.connect()
+            self.assertTrue(browser.opened.wait(1))
+            with self.assertRaises(NavigationPageIncomplete):
+                manager.open_enterprise_search().result(timeout=1)
+
+    def test_dashboard_navigation_uses_mock_browser_and_reports_section(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser = FakeBrowser()
+            manager = self.make_manager(browser, temp_dir)
+            manager.connect()
+            self.assertTrue(browser.opened.wait(1))
+            report = manager.open_dashboard().result(timeout=1)
+            self.assertEqual(browser.dashboard_calls, 1)
+            self.assertEqual(report.state, SessionState.CONNECTED)
+            self.assertEqual(report.page.section, "Tableau de bord")
+
+    def test_home_navigation_is_available_and_reports_the_section(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser = FakeBrowser(PageEvidence(True, False, True, False))
+            browser.page_diagnostics = PageDiagnostics(
+                "https://sidjilcom.cnrc.dz/", "Accueil - Sidjilcom", "Accueil", (), ()
+            )
+            manager = self.make_manager(browser, temp_dir)
+            manager.connect()
+            self.assertTrue(browser.opened.wait(1))
+            report = manager.go_home().result(timeout=1)
+            self.assertEqual(browser.home_calls, 1)
+            self.assertEqual(report.page.section, "Accueil")
 
     def test_browser_errors_do_not_leak_exception_text_to_logs_or_ui(self) -> None:
         secret = "TEST_ONLY_SENTINEL_7d42f0"

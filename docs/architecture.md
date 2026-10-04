@@ -28,8 +28,10 @@ tests/
 3. L'utilisateur s'authentifie manuellement dans cette fenêtre. Le code ne lit pas la valeur des champs, les cookies, le stockage web ou les mots de passe.
 4. Le navigateur vérifie à intervalle régulier uniquement le domaine courant, la présence d'un champ mot de passe, quelques avis d'expiration visibles et des marqueurs sémantiques de déconnexion.
 5. Un indicateur de connexion positive est requis avant d'annoncer « Connecté ». Les indices DOM sont centralisés dans `sidjilcom/selectors.py` afin de les adapter si le portail évolue.
-6. Après une connexion confirmée, un marqueur local vide est créé dans le profil. Il indique uniquement qu'une session avait déjà été établie et permet de détecter une demande de reconnexion après redémarrage.
-7. La fermeture ferme Chromium et conserve le profil local. Une session expirée ne modifie pas SQLite ni les recherches existantes.
+6. Après une connexion confirmée, un marqueur local vide est créé dans le profil. Il indique uniquement qu'une session avait déjà été établie et permet de distinguer une demande de reconnexion après redémarrage. Le marqueur seul ne confirme jamais une session active.
+7. Les commandes Accueil, Tableau de bord et Trouver une entreprise passent par une file de commandes du thread Playwright. Le tableau de bord/la page métier ne confirment l'accès qu'après vérification du contenu réel; une redirection vers login est rapportée.
+8. Le diagnostic ne retourne que l'URL sans query/fragment, le titre, une section reconnue, les liens Sidjilcom connus et les libellés/types des champs visibles. Il ne lit aucune valeur et ne déclenche aucune recherche.
+9. La fermeture ferme Chromium et conserve le profil local. Une session expirée ne modifie pas SQLite ni les recherches existantes.
 
 États affichés : `DISCONNECTED`, `CONNECTING`, `WAITING_FOR_LOGIN`, `CONNECTED`, `SESSION_EXPIRED`, `ERROR`; `DISCONNECTING` est un état transitoire de fermeture.
 
@@ -41,7 +43,7 @@ tests/
 
 Le dossier de profil est un secret local au même titre qu'un état de connexion : ne pas le partager ni le committer. `.gitignore` exclut le profil, cookies, fichiers de stockage Playwright, la base et les logs. Les événements de session ne contiennent que les changements d'état; les messages de page, URL courantes, valeurs de formulaire et exceptions complètes ne sont jamais journalisés.
 
-Le détecteur est volontairement prudent : il ne marque la session active qu'avec un marqueur explicite de session utilisateur (p. ex. une commande de déconnexion), et traite une page de connexion après une session active comme expirée. Il ne résout ni CAPTCHA ni protection anti-bot. Les textes/attributs du portail peuvent changer; une vérification avec un vrai compte autorisé reste nécessaire pour valider les marqueurs de connexion. Si aucun marqueur positif n'existe sur l'écran connecté de Sidjilcom, le détecteur restera en attente jusqu'à adaptation des sélecteurs, plutôt que d'annoncer une connexion non confirmée.
+Le détecteur est volontairement prudent : il s'appuie sur un marqueur de session utilisateur ou sur l'accès au contenu d'une route protégée et traite une page de connexion après une session établie comme expirée. Il ne résout ni CAPTCHA ni protection anti-bot. Les textes/attributs du portail peuvent changer; une validation réelle avec un compte autorisé reste nécessaire. Si aucun marqueur positif ni contenu protégé n'est observé, le détecteur reste en attente au lieu d'annoncer une connexion non confirmée.
 
 ## Recherches et schéma SQLite
 
