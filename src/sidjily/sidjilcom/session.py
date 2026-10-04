@@ -127,6 +127,7 @@ class SidjilcomSessionManager:
         self._thread: threading.Thread | None = None
         self._snapshot = SessionSnapshot(SessionState.DISCONNECTED, self._MESSAGES[SessionState.DISCONNECTED])
         self._previously_connected = self.config.connected_marker_path.is_file()
+        self._confirmed_connected_this_run = False
 
     @property
     def snapshot(self) -> SessionSnapshot:
@@ -153,6 +154,7 @@ class SidjilcomSessionManager:
                     break
             self._disconnect_requested.clear()
             self._previously_connected = self.config.connected_marker_path.is_file()
+            self._confirmed_connected_this_run = False
             self._set_state_locked(SessionState.CONNECTING)
             self._thread = threading.Thread(
                 target=self._run_browser,
@@ -233,7 +235,10 @@ class SidjilcomSessionManager:
         try:
             browser = self._browser_factory()
             browser.open(self.config)
-            self._set_state(SessionState.WAITING_FOR_LOGIN)
+            # Vérifier automatiquement une route qui exige réellement la session: la page
+            # revient sur le formulaire après connexion, ou redirige vers login si nécessaire.
+            browser.probe_authenticated_route(self.config)
+            self._check_page(browser)
             while not self._disconnect_requested.is_set():
                 try:
                     command = self._commands.get(timeout=self.config.poll_interval_seconds)
@@ -265,6 +270,7 @@ class SidjilcomSessionManager:
             with self._lock:
                 if self._disconnect_requested.is_set():
                     self._previously_connected = False
+                    self._confirmed_connected_this_run = False
                     self._set_state_locked(SessionState.DISCONNECTED)
                 if self._thread is threading.current_thread():
                     self._thread = None
@@ -281,9 +287,7 @@ class SidjilcomSessionManager:
                 raise SessionOperationError("Commande de navigation inconnue.")
 
             evidence = browser.inspect(self.config)
-            with self._lock:
-                was_connected = self._previously_connected
-            state = classify_session(evidence, previously_connected=was_connected)
+            state = self._classify_evidence(evidence)
             newly_connected = False
             with self._lock:
                 if state == SessionState.CONNECTED:
@@ -315,9 +319,7 @@ class SidjilcomSessionManager:
                 raise NavigationPageIncomplete()
             if command.name == "search_modes":
                 page = browser.diagnose_search_modes(self.config)
-                after_state = classify_session(
-                    browser.inspect(self.config), previously_connected=self._previously_connected
-                )
+                after_state = self._classify_evidence(browser.inspect(self.config))
                 if after_state == SessionState.SESSION_EXPIRED:
                     self._set_state(after_state)
                     raise SessionExpiredError()
@@ -344,10 +346,7 @@ class SidjilcomSessionManager:
                 command.future.set_exception(NavigationFailed())
 
     def _check_page(self, browser: BrowserAdapter) -> None:
-        evidence = browser.inspect(self.config)
-        with self._lock:
-            was_connected = self._previously_connected
-        state = classify_session(evidence, previously_connected=was_connected)
+        state = self._classify_evidence(browser.inspect(self.config))
         newly_connected = False
         with self._lock:
             if state == SessionState.CONNECTED:
@@ -357,6 +356,24 @@ class SidjilcomSessionManager:
             self._persist_connected_marker()
         with self._lock:
             self._set_state_locked(state)
+
+    def _classify_evidence(self, evidence: PageEvidence) -> SessionState:
+        with self._lock:
+            state = classify_session(evidence, previously_connected=self._previously_connected)
+            if state == SessionState.CONNECTED:
+                self._confirmed_connected_this_run = True
+            elif state == SessionState.SESSION_EXPIRED or not evidence.on_portal:
+                self._confirmed_connected_this_run = False
+            elif (
+                state == SessionState.WAITING_FOR_LOGIN
+                and self._confirmed_connected_this_run
+                and not evidence.has_login_form
+                and not evidence.has_expired_notice
+            ):
+                # Une page publique sans marqueur de menu ne doit pas annuler une confirmation
+                # faite dans cette exécution; login/expiration explicites restent prioritaires.
+                return SessionState.CONNECTED
+            return state
 
     def _persist_connected_marker(self) -> None:
         marker = self.config.connected_marker_path

@@ -44,6 +44,9 @@ class FakeBrowser:
         self.opened = threading.Event()
         self.closed = threading.Event()
         self.opened_with: SessionConfig | None = None
+        self.probe_calls = 0
+        self.probe_evidence: PageEvidence | None = None
+        self.home_evidence: PageEvidence | None = None
         self.home_calls = 0
         self.search_calls = 0
         self.dashboard_calls = 0
@@ -66,11 +69,18 @@ class FakeBrowser:
             raise self.open_error
         self.opened.set()
 
+    def probe_authenticated_route(self, _config: SessionConfig) -> None:
+        self.probe_calls += 1
+        if self.probe_evidence is not None:
+            self.evidence = self.probe_evidence
+
     def inspect(self, _config: SessionConfig) -> PageEvidence:
         return self.evidence
 
     def go_home(self, _config: SessionConfig) -> None:
         self.home_calls += 1
+        if self.home_evidence is not None:
+            self.evidence = self.home_evidence
 
     def navigate_to_enterprise_search(self, _config: SessionConfig) -> None:
         self.search_calls += 1
@@ -273,7 +283,19 @@ class SessionManagerTests(unittest.TestCase):
             self.assertTrue(browser.opened.wait(1))
             self.wait_for_state(manager, SessionState.WAITING_FOR_LOGIN)
             self.assertIn("manuellement", manager.snapshot.message)
+            self.assertEqual(browser.probe_calls, 1)
             self.assertEqual(browser.opened_with.resolved_profile_path, Path(temp_dir) / "browser_profile")
+
+    def test_already_authenticated_session_is_detected_during_startup_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser = FakeBrowser()
+            browser.probe_evidence = PageEvidence(True, False, False, False, True)
+            manager = self.make_manager(browser, temp_dir)
+            manager.connect()
+            self.assertTrue(browser.opened.wait(1))
+            self.wait_for_state(manager, SessionState.CONNECTED)
+            self.assertEqual(browser.probe_calls, 1)
+            self.assertTrue(manager.config.connected_marker_path.is_file())
 
     def test_connection_and_expiration_are_detected_automatically_then_close_cleanly(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -319,6 +341,7 @@ class SessionManagerTests(unittest.TestCase):
             report = manager.open_enterprise_search().result(timeout=1)
             self.assertEqual(browser.search_calls, 1)
             self.assertEqual(report.state, SessionState.CONNECTED)
+            self.assertEqual(manager.snapshot.state, SessionState.CONNECTED)
             self.assertEqual(report.page.section, "Trouver une entreprise")
             self.assertIn("Raison Sociale", report.page.visible_fields[0])
             self.assertTrue(manager.config.connected_marker_path.is_file())
@@ -432,6 +455,19 @@ class SessionManagerTests(unittest.TestCase):
             report = manager.go_home().result(timeout=1)
             self.assertEqual(browser.home_calls, 1)
             self.assertEqual(report.page.section, "Accueil")
+
+    def test_confirmed_session_stays_connected_after_unmarked_portal_navigation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser = FakeBrowser(PageEvidence(True, False, True, False))
+            browser.home_evidence = PageEvidence(True, False, False, False)
+            manager = self.make_manager(browser, temp_dir)
+            manager.connect()
+            self.wait_for_state(manager, SessionState.CONNECTED)
+
+            report = manager.go_home().result(timeout=1)
+
+            self.assertEqual(report.state, SessionState.CONNECTED)
+            self.assertEqual(manager.snapshot.state, SessionState.CONNECTED)
 
     def test_browser_errors_do_not_leak_exception_text_to_logs_or_ui(self) -> None:
         secret = "TEST_ONLY_SENTINEL_7d42f0"

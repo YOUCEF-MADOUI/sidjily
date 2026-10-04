@@ -276,6 +276,8 @@ class BrowserAdapter(Protocol):
 
     def inspect(self, config: SessionConfig) -> PageEvidence: ...
 
+    def probe_authenticated_route(self, config: SessionConfig) -> None: ...
+
     def go_home(self, config: SessionConfig) -> None: ...
 
     def navigate_to_enterprise_search(self, config: SessionConfig) -> None: ...
@@ -319,6 +321,17 @@ class PlaywrightBrowser:
         pages = self._context.pages
         self._page = pages[0] if pages else self._context.new_page()
         self._page.goto(config.url, wait_until="domcontentloaded", timeout=config.navigation_timeout_ms)
+
+    def probe_authenticated_route(self, config: SessionConfig) -> None:
+        """Vérifie l'accès réel en ouvrant la page protégée, sans cliquer ni soumettre."""
+        if self._page is None:
+            raise RuntimeError("Navigateur non démarré.")
+        target = urljoin(config.url, DEFAULT_ENTERPRISE_SEARCH_ROUTE)
+        if not is_portal_host(target, config.url):
+            raise RuntimeError("La destination de vérification n'appartient pas au portail officiel.")
+        # Une navigation GET vers le formulaire protégé distingue une session valide d'une
+        # redirection login; aucun formulaire n'est rempli et aucune recherche n'est envoyée.
+        self._page.goto(target, wait_until="domcontentloaded", timeout=config.navigation_timeout_ms)
 
     def inspect(self, config: SessionConfig) -> PageEvidence:
         if self._page is None:

@@ -25,13 +25,14 @@ tests/
 
 1. L'interface demande au gestionnaire de session d'ouvrir Chromium dans un thread dédié.
 2. Playwright lance un contexte persistant dans `browser_profile_dir()`, jamais dans le profil Chrome de l'utilisateur, puis ouvre l'URL HTTPS officielle.
-3. L'utilisateur s'authentifie manuellement dans cette fenêtre. Le code ne lit pas la valeur des champs, les cookies, le stockage web ou les mots de passe.
-4. Le navigateur vérifie à intervalle régulier uniquement le domaine courant, la présence d'un champ mot de passe, quelques avis d'expiration visibles et des marqueurs sémantiques de déconnexion.
-5. Un indicateur de connexion positive est requis avant d'annoncer « Connecté ». Les indices DOM sont centralisés dans `sidjilcom/selectors.py` afin de les adapter si le portail évolue.
-6. Après une connexion confirmée, un marqueur local vide est créé dans le profil. Il indique uniquement qu'une session avait déjà été établie et permet de distinguer une demande de reconnexion après redémarrage. Le marqueur seul ne confirme jamais une session active.
-7. Les commandes Accueil, Tableau de bord et Trouver une entreprise passent par une file de commandes du thread Playwright. Le tableau de bord/la page métier ne confirment l'accès qu'après vérification du contenu réel; une redirection vers login est rapportée.
-8. Le diagnostic retourne des métadonnées DOM assainies des formulaires et contrôles visibles (jamais leurs valeurs), y compris contraintes, association au formulaire, composants et endpoints déclarés. L'analyse des modes sélectionne uniquement les liens PERSONNES PHYSIQUES/MORALES, attend la stabilisation du portlet et compare les instantanés sans activer les boutons métier ni appeler directement les endpoints.
-9. La fermeture ferme Chromium et conserve le profil local. Une session expirée ne modifie pas SQLite ni les recherches existantes.
+3. Au démarrage, le navigateur vérifie l'accès avec une navigation GET vers la route protégée « Trouver une entreprise ». Le formulaire accessible confirme une session déjà active; une redirection vers login conserve l'état d'attente.
+4. L'utilisateur s'authentifie manuellement dans cette fenêtre. Le code ne lit pas la valeur des champs, les cookies, le stockage web ou les mots de passe; après connexion, le retour du portail vers la route demandée est détecté par le polling.
+5. Le navigateur vérifie ensuite le domaine courant, la présence d'un champ mot de passe, quelques avis d'expiration visibles et des marqueurs sémantiques de déconnexion. Après une confirmation positive durant l'exécution, les pages Sidjilcom sans marqueur de menu ne font pas retomber l'état à « Connexion en attente »; un formulaire/login ou avis d'expiration garde priorité.
+6. Un indicateur de connexion positive est requis avant d'annoncer « Connecté ». Les indices DOM sont centralisés dans `sidjilcom/selectors.py` afin de les adapter si le portail évolue.
+7. Après une connexion confirmée, un marqueur local vide est créé dans le profil. Il indique uniquement qu'une session avait déjà été établie et permet de distinguer une demande de reconnexion après redémarrage. Le marqueur seul ne confirme jamais une session active.
+8. Les commandes Accueil, Tableau de bord et Trouver une entreprise passent par une file de commandes du thread Playwright. Le tableau de bord/la page métier ne confirment l'accès qu'après vérification du contenu réel; une redirection vers login est rapportée.
+9. Le diagnostic retourne des métadonnées DOM assainies des formulaires et contrôles visibles (jamais leurs valeurs), y compris contraintes, association au formulaire, composants et endpoints déclarés. L'analyse des modes sélectionne uniquement les liens PERSONNES PHYSIQUES/MORALES, attend la stabilisation du portlet et compare les instantanés sans activer les boutons métier ni appeler directement les endpoints.
+10. La fermeture ferme Chromium et conserve le profil local. Une session expirée ne modifie pas SQLite ni les recherches existantes.
 
 États affichés : `DISCONNECTED`, `CONNECTING`, `WAITING_FOR_LOGIN`, `CONNECTED`, `SESSION_EXPIRED`, `ERROR`; `DISCONNECTING` est un état transitoire de fermeture.
 

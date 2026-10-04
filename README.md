@@ -40,7 +40,7 @@ Sur Linux, installez également le paquet système Tkinter (`python3-tk`) si né
 
 ## Connexion manuelle
 
-Dans la zone **Connexion Sidjilcom**, sélectionnez **Ouvrir Sidjilcom**. Une fenêtre Chromium visible s'ouvre sur `https://sidjilcom.cnrc.dz/`. Connectez-vous vous-même; l'application ne lit pas les valeurs des champs d'identifiants. Le contexte persistant dédié est enregistré dans le répertoire de données utilisateur :
+Dans la zone **Connexion Sidjilcom**, sélectionnez **Ouvrir Sidjilcom**. Une fenêtre Chromium visible s'ouvre sur le portail officiel; SIDJILY vérifie ensuite automatiquement l'accès en ouvrant la route « Trouver une entreprise » (sans remplir ni soumettre le formulaire). Si Sidjilcom demande une connexion, saisissez vous-même vos identifiants; l'application ne lit pas les valeurs des champs d'identifiants. Après authentification, le retour à la route protégée permet au statut de passer automatiquement à « Connecté ». Le contexte persistant dédié est enregistré dans le répertoire de données utilisateur :
 
 - Windows : `%LOCALAPPDATA%\SIDJILY\browser_profile`
 - Linux : `$XDG_DATA_HOME/SIDJILY/browser_profile` ou `~/.local/share/SIDJILY/browser_profile`

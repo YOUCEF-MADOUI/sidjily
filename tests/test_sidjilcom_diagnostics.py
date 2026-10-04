@@ -109,6 +109,22 @@ class _EmptyLinks:
 
 
 class BrowserDiagnosticMockTests(unittest.TestCase):
+    def test_startup_auth_probe_only_navigates_to_official_protected_page(self) -> None:
+        page = Mock()
+        browser = PlaywrightBrowser()
+        browser._page = page
+        config = SessionConfig(url=DEFAULT_SIDJILCOM_URL)
+
+        browser.probe_authenticated_route(config)
+
+        page.goto.assert_called_once_with(
+            f"https://sidjilcom.cnrc.dz{DEFAULT_ENTERPRISE_SEARCH_ROUTE}",
+            wait_until="domcontentloaded",
+            timeout=config.navigation_timeout_ms,
+        )
+        page.click.assert_not_called()
+        page.fill.assert_not_called()
+
     def test_page_and_accessible_iframe_are_inspected_without_values(self) -> None:
         main_snapshot = {
             "forms": [{"form_id": "search", "form_title": "Recherche principale"}],
