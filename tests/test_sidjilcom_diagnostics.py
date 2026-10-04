@@ -281,6 +281,17 @@ class BrowserDiagnosticMockTests(unittest.TestCase):
         self.assertNotIn("submit()", diagnostic_source)
 
 
+class _ModePortlet:
+    def __init__(self, frame: "_ModeFrame"):
+        self.frame = frame
+
+    def count(self) -> int:
+        return self.frame.portlet_count
+
+    def get_by_role(self, role: str, *, name: object) -> "_ModeCandidates":
+        return _ModeCandidates(self.frame, name) if role == "link" else _ModeCandidates(self.frame, re.compile("$^"))
+
+
 class _ModeCandidates:
     def __init__(self, frame: "_ModeFrame", pattern: object):
         self.frame = frame
@@ -318,6 +329,8 @@ class _ModeFrame:
         self.clicks: list[str] = []
         self.stability_waits = 0
         self.portlet_only_flags: list[bool] = []
+        self.portlet_selectors: list[str] = []
+        self.portlet_count = 1
         self.mode = ""
         self.hide_legal_after_physical = False
         self.snapshots = {
@@ -349,6 +362,10 @@ class _ModeFrame:
             return ("PERSONNES PHYSIQUES",)
         return ("PERSONNES PHYSIQUES", "PERSONNES MORALES")
 
+    def locator(self, selector: str) -> _ModePortlet:
+        self.portlet_selectors.append(selector)
+        return _ModePortlet(self)
+
     def get_by_role(self, role: str, *, name: object) -> _ModeCandidates:
         return _ModeCandidates(self, name) if role == "link" else _ModeCandidates(self, re.compile("$^"))
 
@@ -377,6 +394,8 @@ class SearchModeAnalysisTests(unittest.TestCase):
         self.assertEqual(frame.clicks, ["PERSONNES PHYSIQUES", "PERSONNES MORALES"])
         self.assertEqual(frame.stability_waits, 2)
         self.assertEqual(frame.portlet_only_flags, [True, True])
+        self.assertEqual(len(frame.portlet_selectors), 2)
+        self.assertTrue(all("RechercheDetailleePortlet" in selector for selector in frame.portlet_selectors))
         self.assertIn("===== PERSONNES PHYSIQUES =====", result.report)
         self.assertIn("===== PERSONNES MORALES =====", result.report)
         self.assertIn("PORTLET PARENT", result.report)
@@ -405,6 +424,22 @@ class SearchModeAnalysisTests(unittest.TestCase):
         self.assertEqual(frame.clicks, ["PERSONNES PHYSIQUES", "PERSONNES MORALES"])
         self.assertEqual(page.goto.call_count, 1)
         self.assertIn("===== PERSONNES MORALES =====", result.report)
+
+    def test_mode_analyzer_refuses_ambiguous_portlet_scope_before_clicking_links(self) -> None:
+        frame = _ModeFrame()
+        frame.portlet_count = 2
+        page = Mock()
+        page.url = frame.url
+        page.title.return_value = "Trouver une entreprise"
+        page.frames = [frame]
+        page.main_frame = frame
+        page.get_by_role.return_value = _EmptyLinks()
+        browser = PlaywrightBrowser()
+        browser._page = page
+
+        with self.assertRaises(SearchModeAnalysisError):
+            browser.diagnose_search_modes(SessionConfig(url=DEFAULT_SIDJILCOM_URL))
+        self.assertEqual(frame.clicks, [])
 
     def test_mode_analyzer_refuses_untrusted_or_parameterized_mode_links(self) -> None:
         invalid_hrefs = (

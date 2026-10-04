@@ -49,6 +49,7 @@ class FakeBrowser:
         self.home_evidence: PageEvidence | None = None
         self.home_calls = 0
         self.search_calls = 0
+        self.route_on_search_navigation = False
         self.dashboard_calls = 0
         self.search_mode_calls = 0
         self.navigation_evidence = PageEvidence(True, False, False, False, True)
@@ -62,6 +63,7 @@ class FakeBrowser:
             ),
             visible_fields=("Raison Sociale / Nom commercial [text]",),
         )
+        self.search_page_diagnostics = self.page_diagnostics
 
     def open(self, config: SessionConfig) -> None:
         self.opened_with = config
@@ -85,6 +87,8 @@ class FakeBrowser:
     def navigate_to_enterprise_search(self, _config: SessionConfig) -> None:
         self.search_calls += 1
         self.evidence = self.navigation_evidence
+        if self.route_on_search_navigation:
+            self.page_diagnostics = self.search_page_diagnostics
 
     def navigate_to_dashboard(self, _config: SessionConfig) -> None:
         self.dashboard_calls += 1
@@ -363,9 +367,45 @@ class SessionManagerTests(unittest.TestCase):
             manager = self.make_manager(browser, temp_dir)
             manager.connect()
             self.assertTrue(browser.opened.wait(1))
-            with self.assertRaises(SessionNotConnected):
+            with self.assertRaises(SessionNotConnected) as caught:
                 manager.diagnose_search_modes().result(timeout=1)
+            self.assertEqual(
+                str(caught.exception),
+                "Session Sidjilcom non authentifiée. Veuillez vous connecter dans Chromium.",
+            )
             self.assertEqual(browser.search_mode_calls, 0)
+
+    def test_analysis_navigates_to_enterprise_search_when_needed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser = FakeBrowser(PageEvidence(True, False, True, False))
+            browser.page_diagnostics = PageDiagnostics(
+                "https://sidjilcom.cnrc.dz/",
+                "Accueil - Sidjilcom",
+                "Accueil",
+                (),
+                (),
+            )
+            browser.route_on_search_navigation = True
+            manager = self.make_manager(browser, temp_dir)
+            manager.connect()
+            self.assertTrue(browser.opened.wait(1))
+            result = manager.diagnose_search_modes().result(timeout=1)
+            self.assertEqual(browser.search_calls, 1)
+            self.assertEqual(browser.search_mode_calls, 1)
+            self.assertEqual(result.page.section, "Trouver une entreprise")
+
+    def test_analysis_rechecks_login_manually_before_proceeding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser = FakeBrowser(PageEvidence(True, True, False, False))
+            manager = self.make_manager(browser, temp_dir)
+            manager.connect()
+            self.assertTrue(browser.opened.wait(1))
+            self.wait_for_state(manager, SessionState.WAITING_FOR_LOGIN)
+            browser.probe_evidence = PageEvidence(True, False, True, False)
+            result = manager.diagnose_search_modes().result(timeout=1)
+            self.assertEqual(browser.probe_calls, 2)
+            self.assertEqual(browser.search_mode_calls, 1)
+            self.assertEqual(result.state, SessionState.CONNECTED)
 
     def test_unauthenticated_redirect_is_reported_to_the_caller(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -48,7 +48,7 @@ class SessionOperationError(RuntimeError):
 
 class SessionNotConnected(SessionOperationError):
     def __init__(self) -> None:
-        super().__init__("Session non confirmée. Connectez-vous dans le navigateur puis réessayez.")
+        super().__init__("Session Sidjilcom non authentifiée. Veuillez vous connecter dans Chromium.")
 
 
 class SessionExpiredError(SessionOperationError):
@@ -288,22 +288,42 @@ class SidjilcomSessionManager:
 
             evidence = browser.inspect(self.config)
             state = self._classify_evidence(evidence)
-            newly_connected = False
-            with self._lock:
-                if state == SessionState.CONNECTED:
-                    newly_connected = not self._previously_connected
-                    self._previously_connected = True
-            if newly_connected:
-                self._persist_connected_marker()
-            self._set_state(state)
+            self._record_session_state(state)
             protected_navigation = command.name in ("dashboard", "enterprise_search")
             if protected_navigation and state == SessionState.SESSION_EXPIRED:
                 raise SessionExpiredError()
-            if command.name == "search_modes" and state == SessionState.SESSION_EXPIRED:
-                raise SessionExpiredError()
-            if command.name == "search_modes" and state != SessionState.CONNECTED:
-                raise SessionNotConnected()
-            page = None if command.name == "search_modes" else browser.diagnostics(self.config)
+            if command.name == "search_modes":
+                if state == SessionState.SESSION_EXPIRED:
+                    raise SessionExpiredError()
+                if state != SessionState.CONNECTED:
+                    # Vérifier une dernière fois la route protégée au moment de l'analyse;
+                    # le navigateur reste visible et toute connexion reste manuelle.
+                    browser.probe_authenticated_route(self.config)
+                    evidence = browser.inspect(self.config)
+                    state = self._classify_evidence(evidence)
+                    self._record_session_state(state)
+                    if state == SessionState.SESSION_EXPIRED:
+                        raise SessionExpiredError()
+                    if state != SessionState.CONNECTED:
+                        raise SessionNotConnected()
+
+                page = browser.diagnostics(self.config)
+                if page.section != "Trouver une entreprise":
+                    browser.navigate_to_enterprise_search(self.config)
+                    evidence = browser.inspect(self.config)
+                    state = self._classify_evidence(evidence)
+                    self._record_session_state(state)
+                    if state == SessionState.SESSION_EXPIRED:
+                        raise SessionExpiredError()
+                    if state != SessionState.CONNECTED:
+                        raise SessionNotConnected()
+                    page = browser.diagnostics(self.config)
+                    if page.section != "Trouver une entreprise":
+                        raise NavigationElementNotFound()
+                else:
+                    page = None
+            else:
+                page = browser.diagnostics(self.config)
 
             expected_section = {
                 "dashboard": "Tableau de bord",
@@ -320,13 +340,12 @@ class SidjilcomSessionManager:
             if command.name == "search_modes":
                 page = browser.diagnose_search_modes(self.config)
                 after_state = self._classify_evidence(browser.inspect(self.config))
+                self._record_session_state(after_state)
                 if after_state == SessionState.SESSION_EXPIRED:
-                    self._set_state(after_state)
                     raise SessionExpiredError()
                 if after_state != SessionState.CONNECTED:
-                    self._set_state(after_state)
                     raise SessionNotConnected()
-                self._set_state(after_state)
+                state = after_state
             if not command.future.done():
                 command.future.set_result(SessionDiagnostics(state=state, page=page))
         except SessionOperationError as exc:
@@ -346,7 +365,9 @@ class SidjilcomSessionManager:
                 command.future.set_exception(NavigationFailed())
 
     def _check_page(self, browser: BrowserAdapter) -> None:
-        state = self._classify_evidence(browser.inspect(self.config))
+        self._record_session_state(self._classify_evidence(browser.inspect(self.config)))
+
+    def _record_session_state(self, state: SessionState) -> None:
         newly_connected = False
         with self._lock:
             if state == SessionState.CONNECTED:
@@ -354,8 +375,7 @@ class SidjilcomSessionManager:
                 self._previously_connected = True
         if newly_connected:
             self._persist_connected_marker()
-        with self._lock:
-            self._set_state_locked(state)
+        self._set_state(state)
 
     def _classify_evidence(self, evidence: PageEvidence) -> SessionState:
         with self._lock:

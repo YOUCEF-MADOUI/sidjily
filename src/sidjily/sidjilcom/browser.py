@@ -51,31 +51,97 @@ class SearchModeAnalysisError(RuntimeError):
     """Échec d'analyse des modes, avec un message qui ne reflète pas le contenu de page."""
 
 
+SEARCH_MODE_PORTLET_MARKER = "dz_cnrc_sidjilcom_recherchedetaillee_portlet_RechercheDetailleePortlet"
+SEARCH_MODE_PORTLET_SELECTOR = (
+    f'[id*="{SEARCH_MODE_PORTLET_MARKER}"], '
+    f'[class*="{SEARCH_MODE_PORTLET_MARKER}"]'
+)
+
+
 SEARCH_MODE_STABILITY_SCRIPT = r"""async () => {
     const marker = 'dz_cnrc_sidjilcom_recherchedetaillee_portlet_RechercheDetailleePortlet';
-    const portlet = document.querySelector(`[id*="${marker}"], [class*="${marker}"]`);
-    const root = portlet?.parentElement || portlet || document.body;
-    if (!root) return false;
+    const portletSelector = `[id*="${marker}"], [class*="${marker}"]`;
+    const loadingSelector = '[aria-busy="true"], [role="progressbar"], .loading, .loader, .spinner, ' +
+        '[class*="loading" i], [class*="loader" i], [class*="spinner" i]';
+    const controlSelector = 'input:not([type="hidden"]):not([type="password"]), select, textarea, button, ' +
+        '[role="textbox"], [role="combobox"], [role="searchbox"]';
+    const timeoutMs = 20000;
+    const quietMs = 900;
+    const sampleMs = 250;
+    const visible = element => {
+        const style = window.getComputedStyle(element);
+        return !!(element.getClientRects().length && style.display !== 'none' &&
+            style.visibility !== 'hidden' && style.opacity !== '0' &&
+            !element.closest('[hidden], [aria-hidden="true"]'));
+    };
+    const currentPortlet = () => document.querySelector(portletSelector);
+    const formCount = root => (root.matches('form') ? 1 : 0) + root.querySelectorAll('form').length;
+    const controlCount = root => (root.matches(controlSelector) ? 1 : 0) +
+        root.querySelectorAll(controlSelector).length;
+    const hasVisibleLoader = root => {
+        const indicators = [
+            ...(root.matches(loadingSelector) ? [root] : []),
+            ...Array.from(root.querySelectorAll(loadingSelector))
+        ];
+        return indicators.some(visible);
+    };
     return await new Promise(resolve => {
-        let quietTimer;
-        let timeoutTimer;
         let settled = false;
-        const observer = new MutationObserver(schedule);
+        let sampleTimer;
+        let timeoutTimer;
+        let lastMutationAt = performance.now();
+        let previousControlCount = -1;
+        let stableSamples = 0;
         const finish = stable => {
             if (settled) return;
             settled = true;
             observer.disconnect();
-            clearTimeout(quietTimer);
+            document.removeEventListener('readystatechange', scheduleSample);
+            clearTimeout(sampleTimer);
             clearTimeout(timeoutTimer);
             resolve(stable);
         };
-        function schedule() {
-            clearTimeout(quietTimer);
-            quietTimer = setTimeout(() => finish(true), 900);
+        const observer = new MutationObserver(() => {
+            lastMutationAt = performance.now();
+            previousControlCount = -1;
+            stableSamples = 0;
+            scheduleSample();
+        });
+        function scheduleSample() {
+            if (settled || sampleTimer) return;
+            sampleTimer = setTimeout(sample, sampleMs);
         }
-        observer.observe(root, {subtree: true, childList: true, attributes: true, characterData: true});
-        timeoutTimer = setTimeout(() => finish(false), 15000);
-        schedule();
+        function sample() {
+            sampleTimer = null;
+            if (settled) return;
+            const root = currentPortlet();
+            if (!root || document.readyState === 'loading' || formCount(root) === 0 || hasVisibleLoader(root)) {
+                previousControlCount = -1;
+                stableSamples = 0;
+                scheduleSample();
+                return;
+            }
+            const count = controlCount(root);
+            if (count === 0) {
+                previousControlCount = -1;
+                stableSamples = 0;
+                scheduleSample();
+                return;
+            }
+            stableSamples = count === previousControlCount ? stableSamples + 1 : 0;
+            previousControlCount = count;
+            if (stableSamples >= 2 && performance.now() - lastMutationAt >= quietMs) {
+                finish(true);
+                return;
+            }
+            scheduleSample();
+        }
+        observer.observe(document.documentElement, {
+            subtree: true, childList: true, attributes: true, characterData: true
+        });
+        document.addEventListener('readystatechange', scheduleSample);
+        timeoutTimer = setTimeout(() => finish(false), timeoutMs);
+        scheduleSample();
     });
 }"""
 
@@ -555,7 +621,10 @@ class PlaywrightBrowser:
         matches: list[tuple[Any, Any]] = []
         for frame in list(self._page.frames):
             try:
-                candidates = frame.get_by_role("link", name=pattern)
+                portlet = frame.locator(SEARCH_MODE_PORTLET_SELECTOR)
+                if portlet.count() != 1:
+                    continue
+                candidates = portlet.get_by_role("link", name=pattern)
                 count = candidates.count()
                 for index in range(min(count, 3)):
                     candidate = candidates.nth(index)
