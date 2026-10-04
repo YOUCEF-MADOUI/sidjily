@@ -43,6 +43,138 @@ class PageDiagnostics:
     report: str = ""
 
 
+DOM_SNAPSHOT_SCRIPT = r"""() => {
+    const sensitiveName = /password|passwd|token|secret|csrf|cookie|session|auth/i;
+    const allowedOptionLabels = ['type de personne', 'personne physique', 'personne morale',
+        'wilaya', 'commune', 'secteur', 'activite', 'forme juridique', 'conformite',
+        'etat commercant', 'nationalite', 'qualite'];
+    const sensitiveOptionLabels = ['nom', 'prenom', 'email', 'e-mail', 'telephone', 'date',
+        'numero', 'inscription', 'raison sociale', 'commercial', 'dirigeant', 'adresse', 'nif', 'nis'];
+    const visible = element => {
+        const style = window.getComputedStyle(element);
+        return !!(element.getClientRects().length && style.visibility !== 'hidden' &&
+            style.display !== 'none' && style.opacity !== '0' &&
+            !element.closest('[hidden], [aria-hidden="true"]'));
+    };
+    const dataAttributes = element => {
+        const result = {};
+        for (const attribute of Array.from(element.attributes)) {
+            if (attribute.name.startsWith('data-') && !sensitiveName.test(attribute.name) &&
+                attribute.name.length <= 64) {
+                result[attribute.name] = element.getAttribute(attribute.name);
+            }
+        }
+        return result;
+    };
+    const hierarchy = element => {
+        const path = [];
+        let current = element;
+        while (current && current.nodeType === Node.ELEMENT_NODE && path.length < 9) {
+            const tag = current.tagName.toLowerCase();
+            const id = current.id ? `#${current.id}` : '';
+            const classes = Array.from(current.classList || []).slice(0, 3)
+                .map(name => `.${name}`).join('');
+            path.unshift(`${tag}${id}${classes}`);
+            if (tag === 'body') break;
+            current = current.parentElement;
+        }
+        return path;
+    };
+    const associatedText = element => {
+        const labels = Array.from(element.labels || [])
+            .map(label => label.innerText?.trim() || '').filter(Boolean);
+        if (!labels.length && element.id) {
+            for (const label of document.querySelectorAll('label[for]')) {
+                if (label.getAttribute('for') === element.id && label.innerText?.trim()) {
+                    labels.push(label.innerText.trim());
+                }
+            }
+        }
+        const labelledBy = (element.getAttribute('aria-labelledby') || '').split(/\s+/)
+            .filter(Boolean)
+            .map(id => document.getElementById(id)?.innerText?.trim() || '').filter(Boolean);
+        return labels.join(' ') || labelledBy.join(' ') ||
+            element.getAttribute('aria-label') || element.getAttribute('placeholder') || '';
+    };
+    const formInfo = element => {
+        const form = element.closest('form') || element.form || null;
+        if (!form) return {id: 'hors-formulaire', title: 'Hors formulaire'};
+        const id = form.id || `formulaire-${Array.from(document.forms).indexOf(form) + 1}`;
+        return {
+            id,
+            title: form.getAttribute('aria-label') || form.getAttribute('title') ||
+                form.querySelector('legend')?.innerText?.trim() || `Formulaire ${id}`
+        };
+    };
+    const mayReadOptionText = label => {
+        const normalized = label.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+        const location = normalized.includes('wilaya') || normalized.includes('commune');
+        if (sensitiveOptionLabels.some(word => normalized.includes(word)) && !location) return false;
+        return allowedOptionLabels.some(word => normalized.includes(word));
+    };
+    const forms = Array.from(document.querySelectorAll('form')).map((form, index) => ({
+        form_id: form.id || `formulaire-${index + 1}`,
+        form_title: form.getAttribute('aria-label') || form.getAttribute('title') ||
+            form.querySelector('legend')?.innerText?.trim() || `Formulaire ${index + 1}`
+    }));
+    const fields = [];
+    const buttons = [];
+    const clickables = [];
+    const selector = [
+        'input', 'select', 'textarea', 'button', '[role="textbox"]', '[role="combobox"]',
+        '[role="searchbox"]', '[role="button"]', '[role="link"]', '[role="menuitem"]',
+        '[contenteditable="true"]', 'a[href]', '[onclick]', '[tabindex]'
+    ].join(',');
+    for (const element of document.querySelectorAll(selector)) {
+        const tag = element.tagName.toLowerCase();
+        const type = (element.getAttribute('type') || (tag === 'input' ? 'text' : tag)).toLowerCase();
+        const name = element.getAttribute('name') || '';
+        if (type === 'password' || type === 'hidden' || sensitiveName.test(name)) continue;
+        const role = element.getAttribute('role') || '';
+        const form = formInfo(element);
+        const label = associatedText(element);
+        const record = {
+            label,
+            associated_text: label,
+            html_type: type,
+            role: role || (element.isContentEditable ? 'textbox' : ''),
+            name,
+            id: element.id || '',
+            tag_name: tag,
+            aria_label: element.getAttribute('aria-label') || '',
+            aria_labelledby: element.getAttribute('aria-labelledby') || '',
+            placeholder: element.getAttribute('placeholder') || '',
+            data_attributes: dataAttributes(element),
+            disabled: !!element.disabled || element.getAttribute('aria-disabled') === 'true',
+            visible: visible(element),
+            hierarchy: hierarchy(element),
+            form_id: form.id,
+            form_title: form.title,
+            option_count: tag === 'select' ? element.options.length : 0,
+            options: tag === 'select' && mayReadOptionText(label)
+                ? Array.from(element.options).map(option => option.innerText?.trim() || '') : []
+        };
+        const isButton = tag === 'button' ||
+            (tag === 'input' && ['submit', 'button', 'reset', 'image'].includes(type)) || role === 'button';
+        const tabIndex = element.getAttribute('tabindex');
+        const potentiallyClickable = isButton || tag === 'a' || role === 'link' || role === 'menuitem' ||
+            element.hasAttribute('onclick') || (tabIndex !== null && Number(tabIndex) >= 0);
+        if (isButton) {
+            buttons.push({...record, text: element.getAttribute('aria-label') ||
+                element.innerText?.trim() || element.getAttribute('title') || '', nature: 'bouton'});
+        } else if (tag === 'input' || tag === 'select' || tag === 'textarea' ||
+            ['textbox', 'combobox', 'searchbox'].includes(role) || element.isContentEditable) {
+            fields.push(record);
+        }
+        if (potentiallyClickable) {
+            clickables.push({...record, text: element.getAttribute('aria-label') ||
+                element.innerText?.trim() || element.getAttribute('title') || '', nature: 'élément cliquable'});
+        }
+    }
+    return {forms, fields, buttons, clickables};
+}"""
+
+
 class BrowserAdapter(Protocol):
     """Interface injectable pour tests et évolution du navigateur."""
 
@@ -173,7 +305,7 @@ class PlaywrightBrowser:
         self._page.goto(target, wait_until="domcontentloaded", timeout=config.navigation_timeout_ms)
 
     def diagnostics(self, config: SessionConfig) -> PageDiagnostics:
-        """Retourne un rapport DOM structurel sans lire les valeurs des contrôles."""
+        """Inspecte la page et ses frames, sans lire/modifier aucune valeur de formulaire."""
         if self._page is None:
             raise RuntimeError("Navigateur non démarré.")
         current_url = self._page.url
@@ -191,105 +323,59 @@ class PlaywrightBrowser:
                 if item not in navigation_items:
                     navigation_items.append(item)
 
-        raw = self._page.locator("input, select, textarea, button").evaluate_all(
-            """elements => {
-                const visible = element => {
-                    const style = window.getComputedStyle(element);
-                    return !!(element.getClientRects().length && style.visibility !== 'hidden' &&
-                        style.display !== 'none' && !element.closest('[hidden]'));
-                };
-                const dataAttributes = element => {
-                    const allowed = ['data-testid', 'data-test', 'data-qa', 'data-cy',
-                        'data-field', 'data-field-name', 'data-role'];
-                    const result = {};
-                    for (const name of allowed) {
-                        const value = element.getAttribute(name);
-                        if (value) result[name] = value;
-                    }
-                    return result;
-                };
-                const hierarchy = element => {
-                    const sets = [];
-                    let set = element.closest('fieldset');
-                    while (set) {
-                        sets.unshift(set);
-                        set = set.parentElement?.closest('fieldset') || null;
-                    }
-                    return sets.map(item => item.querySelector(':scope > legend')?.innerText?.trim() || '')
-                        .filter(Boolean).slice(0, 8);
-                };
-                const formInfo = element => {
-                    const form = element.closest('form');
-                    return {
-                        id: form?.id || (form ? `formulaire-${Array.from(document.forms).indexOf(form) + 1}` : 'hors-formulaire'),
-                        title: form?.getAttribute('aria-label') || form?.getAttribute('title') ||
-                            form?.querySelector('legend')?.innerText?.trim() || 'Formulaire'
-                    };
-                };
-                const allowedOptionLabels = ['type de personne', 'personne physique', 'personne morale',
-                    'wilaya', 'commune', 'secteur', 'activite', 'forme juridique', 'conformite',
-                    'etat commercant', 'nationalite', 'qualite'];
-                const sensitiveOptionLabels = ['nom', 'prenom', 'email', 'e-mail', 'telephone', 'date',
-                    'numero', 'inscription', 'raison sociale', 'commercial', 'dirigeant', 'adresse', 'nif', 'nis'];
-                const mayReadOptionText = label => {
-                    const normalized = label.normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
-                    const location = normalized.includes('wilaya') || normalized.includes('commune');
-                    if (sensitiveOptionLabels.some(word => normalized.includes(word)) && !location) return false;
-                    return allowedOptionLabels.some(word => normalized.includes(word));
-                };
-                const controls = [];
-                const buttons = [];
-                for (const element of elements) {
-                    if (!visible(element)) continue;
-                    const tag = element.tagName.toLowerCase();
-                    const type = (element.getAttribute('type') || (tag === 'input' ? 'text' : tag)).toLowerCase();
-                    if (tag === 'button' || (tag === 'input' && ['submit', 'button', 'reset'].includes(type))) {
-                        buttons.push({
-                            text: element.getAttribute('aria-label') || element.innerText?.trim() ||
-                                element.getAttribute('title') || '',
-                            html_type: type === 'button' && tag === 'button' ?
-                                (element.getAttribute('type') || 'submit') : type,
-                            role: element.getAttribute('role') || 'button',
-                            name: element.getAttribute('name') || '',
-                            id: element.id || '',
-                            data_attributes: dataAttributes(element),
-                            disabled: !!element.disabled,
-                            form_title: formInfo(element).title,
-                            hierarchy: hierarchy(element)
-                        });
-                        continue;
-                    }
-                    if (type === 'password' || type === 'hidden' || element.matches('[type="hidden"]')) continue;
-                    const labels = Array.from(element.labels || [])
-                        .map(label => label.innerText?.trim() || '').filter(Boolean);
-                    const labelledBy = (element.getAttribute('aria-labelledby') || '').split(/\s+/)
-                        .map(id => document.getElementById(id)?.innerText?.trim() || '').filter(Boolean);
-                    const label = element.getAttribute('aria-label') || labels.join(' ') ||
-                        labelledBy.join(' ') || element.getAttribute('placeholder') || '';
-                    const form = formInfo(element);
-                    const options = tag === 'select' && mayReadOptionText(label) ?
-                        Array.from(element.options).slice(0, 100)
-                            .map(option => option.innerText?.trim() || '') : [];
-                    controls.push({
-                        label,
-                        associated_text: label,
-                        html_type: type,
-                        role: element.getAttribute('role') || '',
-                        name: element.getAttribute('name') || '',
-                        id: element.id || '',
-                        placeholder: element.getAttribute('placeholder') || '',
-                        data_attributes: dataAttributes(element),
-                        disabled: !!element.disabled,
-                        option_count: tag === 'select' ? element.options.length : 0,
-                        options,
-                        form_id: form.id,
-                        form_title: form.title,
-                        hierarchy: hierarchy(element)
-                    });
-                }
-                return {fields: controls, buttons};
-            }"""
-        )
+        raw: dict[str, list[dict[str, object]]] = {
+            "frames": [], "form_entries": [], "fields": [], "buttons": [], "clickables": []
+        }
+        for frame_index, frame in enumerate(list(self._page.frames)):
+            fallback_name = "Document principal" if frame_index == 0 else f"Frame {frame_index}"
+            frame_name = fallback_name
+            frame_url = "URL indisponible"
+            try:
+                frame_name = sanitize_metadata_text(frame.name, 100) or fallback_name
+                frame_url = sanitize_current_url(frame.url, config.url)
+                snapshot = frame.evaluate(DOM_SNAPSHOT_SCRIPT)
+                if not isinstance(snapshot, dict):
+                    raise TypeError("snapshot DOM indisponible")
+            except Exception:
+                # Ne pas exposer l'exception : elle pourrait contenir une URL ou des données de page.
+                raw["frames"].append({
+                    "name": frame_name,
+                    "url": frame_url,
+                    "accessible": False,
+                    "form_count": 0,
+                    "control_count": 0,
+                })
+                continue
+
+            frame_forms = snapshot.get("forms", [])
+            frame_fields = snapshot.get("fields", [])
+            frame_buttons = snapshot.get("buttons", [])
+            frame_clickables = snapshot.get("clickables", [])
+            frame_forms = frame_forms if isinstance(frame_forms, list) else []
+            frame_fields = frame_fields if isinstance(frame_fields, list) else []
+            frame_buttons = frame_buttons if isinstance(frame_buttons, list) else []
+            frame_clickables = frame_clickables if isinstance(frame_clickables, list) else []
+            raw["frames"].append({
+                "name": frame_name,
+                "url": frame_url,
+                "accessible": True,
+                "form_count": len(frame_forms),
+                "control_count": len(frame_fields) + len(frame_buttons),
+            })
+            for collection_name, collection in (
+                ("form_entries", frame_forms),
+                ("fields", frame_fields),
+                ("buttons", frame_buttons),
+                ("clickables", frame_clickables),
+            ):
+                for item in collection:
+                    if not isinstance(item, dict):
+                        continue
+                    entry = dict(item)
+                    entry["frame_name"] = frame_name
+                    entry["frame_url"] = frame_url
+                    raw[collection_name].append(entry)
+
         bundle = build_form_diagnostics(raw)
         title = sanitize_metadata_text(self._page.title(), 160)
         page = PageDiagnostics(
@@ -298,9 +384,13 @@ class PlaywrightBrowser:
             section=identify_section(current_url),
             navigation_items=tuple(navigation_items),
             visible_fields=tuple(
-                dict.fromkeys(f"{field.label} [{field.html_type}]" for form in bundle.forms for field in form.fields)
-            )[:80],
+                dict.fromkeys(
+                    f"{field.label} [{field.html_type}]"
+                    for field in bundle.all_controls if field.visible
+                )
+            )[:120],
             form_diagnostics=bundle,
+            report="",
         )
         return PageDiagnostics(
             url=page.url,

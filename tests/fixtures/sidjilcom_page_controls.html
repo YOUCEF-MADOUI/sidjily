@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="fr">
+<body>
+  <main id="search-content" class="portlet-content">
+    <form id="classic-search" aria-label="Recherche classique">
+      <fieldset>
+        <legend>Critères</legend>
+        <label for="company-name">Raison sociale</label>
+        <input id="company-name" name="company_name" type="text" placeholder="Saisir un nom"
+               value="VALEUR PRIVEE 918273" data-testid="company-input">
+        <label for="wilaya">Wilaya</label>
+        <select id="wilaya" name="wilaya" disabled>
+          <option value="01">Sétif</option><option value="02">Alger</option>
+        </select>
+        <button id="search-button" type="submit">Rechercher</button>
+      </fieldset>
+    </form>
+
+    <input id="outside-search" name="external_query" type="search" aria-label="Recherche hors formulaire"
+           data-automation-id="outside-search-control" data-token="NE-PAS-COPIER"
+           value="DONNEE EXTERNE PRIVEE">
+    <span id="outside-label">Référence liée</span>
+    <input id="labelled-control" name="reference" type="text" aria-labelledby="outside-label"
+           disabled value="SECRET INPUT VALUE">
+    <input id="hidden-helper" name="visible_state_fixture" type="text" hidden
+           value="HIDDEN FIELD VALUE MUST NOT APPEAR">
+    <div id="custom-combo" role="combobox" aria-label="Choix personnalisé" tabindex="0"
+         data-qa="custom-combobox"></div>
+    <div id="custom-textbox" role="textbox" aria-labelledby="outside-label" contenteditable="true"></div>
+    <textarea id="comments" name="comments" aria-label="Commentaire" disabled>NE PAS LIRE</textarea>
+    <div id="custom-button" role="button" aria-label="Valider dossier privé" aria-disabled="true"></div>
+    <a id="details-link" href="/fr/details?token=NE-PAS-GARDER" tabindex="0">Voir détails</a>
+    <iframe id="embedded-portlet" name="registry-frame" title="Portail intégré"
+            src="https://sidjilcom.cnrc.dz/fr/embedded?access_token=FRAME-SECRET"></iframe>
+    <input type="password" name="password" value="MOT-DE-PASSE-SECRET">
+    <input type="hidden" name="csrf_token" value="JETON-CSRF-SECRET">
+  </main>
+</body>
+</html>
