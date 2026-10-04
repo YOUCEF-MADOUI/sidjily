@@ -337,8 +337,15 @@ class SidjilyApp:
         try:
             result = future.result()
         except SessionOperationError as exc:
-            self._set_diagnostic_report("")
-            self.diagnostic_output.configure(text=str(exc))
+            message = str(exc)
+            if "DIAGNOSTIC DE DÉTECTION DES MODES" in message:
+                self._set_diagnostic_report(message)
+                self.diagnostic_output.configure(
+                    text="Détection des modes incomplète; le rapport de candidats est affiché ci-dessous."
+                )
+            else:
+                self._set_diagnostic_report("")
+                self.diagnostic_output.configure(text=message)
         except Exception:
             self._set_diagnostic_report("")
             self.diagnostic_output.configure(text="Diagnostic impossible; consultez l'état du navigateur et du réseau.")

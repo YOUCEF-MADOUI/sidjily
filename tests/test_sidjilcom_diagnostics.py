@@ -3,11 +3,19 @@ from __future__ import annotations
 import inspect
 import re
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from sidjily.sidjilcom.browser import PlaywrightBrowser, SearchModeAnalysisError
+from sidjily.sidjilcom.browser import (
+    SEARCH_MODE_CANDIDATES_SCRIPT,
+    SEARCH_MODE_LABELS,
+    PlaywrightBrowser,
+    SearchModeAnalysisError,
+    _SearchModeCandidate,
+    normalize_search_mode_label,
+)
 from sidjily.sidjilcom.config import DEFAULT_SIDJILCOM_URL, SessionConfig
 from sidjily.sidjilcom.selectors import DEFAULT_ENTERPRISE_SEARCH_ROUTE
 from sidjily.sidjilcom.diagnostics import (
@@ -120,6 +128,27 @@ class DiagnosticFixtureTests(unittest.TestCase):
         self.assertEqual(mixed_field.options, ())
         self.assertTrue(mixed_field.options_redacted)
         self.assertNotIn("Région privée", str(mixed))
+
+
+class CandidateDetectionSafetyTests(unittest.TestCase):
+    def test_candidate_script_reads_no_form_values_or_credentials_and_excludes_submit_reset(self) -> None:
+        self.assertNotIn("element.value", SEARCH_MODE_CANDIDATES_SCRIPT)
+        self.assertNotIn("target.value", SEARCH_MODE_CANDIDATES_SCRIPT)
+        self.assertNotIn("option.value", SEARCH_MODE_CANDIDATES_SCRIPT)
+        self.assertNotIn("getAttribute('href')", SEARCH_MODE_CANDIDATES_SCRIPT)
+        self.assertNotIn("target.search", SEARCH_MODE_CANDIDATES_SCRIPT)
+        self.assertNotIn("target.password", SEARCH_MODE_CANDIDATES_SCRIPT)
+        self.assertNotIn("document.cookie", SEARCH_MODE_CANDIDATES_SCRIPT)
+        self.assertNotIn("localStorage", SEARCH_MODE_CANDIDATES_SCRIPT)
+        self.assertNotIn(".click(", SEARCH_MODE_CANDIDATES_SCRIPT)
+        self.assertIn("forbiddenFormButton", SEARCH_MODE_CANDIDATES_SCRIPT)
+        self.assertIn("submit", SEARCH_MODE_CANDIDATES_SCRIPT)
+        self.assertIn("reset", SEARCH_MODE_CANDIDATES_SCRIPT)
+        self.assertIn("normalize('NFKC')", SEARCH_MODE_CANDIDATES_SCRIPT)
+        self.assertIn("toLocaleUpperCase('fr')", SEARCH_MODE_CANDIDATES_SCRIPT)
+        self.assertIn("innerText", SEARCH_MODE_CANDIDATES_SCRIPT)
+        self.assertIn("textContent", SEARCH_MODE_CANDIDATES_SCRIPT)
+        self.assertIn("aria-label", SEARCH_MODE_CANDIDATES_SCRIPT)
 
 
 class _EmptyLinks:
@@ -281,58 +310,75 @@ class BrowserDiagnosticMockTests(unittest.TestCase):
         self.assertNotIn("submit()", diagnostic_source)
 
 
-class _ModePortlet:
-    def __init__(self, frame: "_ModeFrame"):
+# Ces candidats sont des fixtures simulées; aucun DOM réel ni compte Sidjilcom n'est utilisé.
+class _ModeLocator:
+    def __init__(self, frame: "_ModeFrame", selector: str):
         self.frame = frame
+        self.selector = selector
+
+    def _record(self) -> dict[str, object] | None:
+        for label in self.frame.available_modes:
+            for candidate in self.frame.mode_candidates[label]:
+                if candidate["selector"] == self.selector:
+                    return candidate
+        return None
 
     def count(self) -> int:
-        return self.frame.portlet_count
+        return int(self._record() is not None)
 
-    def get_by_role(self, role: str, *, name: object) -> "_ModeCandidates":
-        return _ModeCandidates(self.frame, name) if role == "link" else _ModeCandidates(self.frame, re.compile("$^"))
+    def is_visible(self) -> bool:
+        record = self._record()
+        return bool(record and record["visible"])
 
-
-class _ModeCandidates:
-    def __init__(self, frame: "_ModeFrame", pattern: object):
-        self.frame = frame
-        self.pattern = pattern
-        self.label = next(
-            (label for label in frame.mode_links if pattern.search(label)),
-            "",
-        )
-
-    def count(self) -> int:
-        return 1 if self.label else 0
-
-    def nth(self, index: int) -> "_ModeCandidates":
-        if index != 0 or not self.label:
-            raise IndexError(index)
-        return self
-
-    def get_attribute(self, name: str) -> str | None:
-        return self.frame.mode_link_href if name == "href" else None
-
-    def evaluate(self, _script: str) -> str:
-        return "a"
+    def is_enabled(self) -> bool:
+        record = self._record()
+        return bool(record and record["enabled"])
 
     def click(self, *, timeout: int) -> None:
-        self.frame.clicks.append(self.label)
-        self.frame.mode = self.label
+        record = self._record()
+        if record is None or not self.is_visible() or not self.is_enabled():
+            raise RuntimeError("fixture locator not available")
+        label = str(record["label"])
+        self.frame.clicks.append(label)
+        self.frame.mode = label
 
 
 class _ModeFrame:
     name = ""
     url = f"https://sidjilcom.cnrc.dz{DEFAULT_ENTERPRISE_SEARCH_ROUTE}"
-    mode_link_href = "/fr/group/sidjilcom/repertoire-des-commercants"
+
+    @staticmethod
+    def _candidate(label: str, index: int, **overrides: object) -> dict[str, object]:
+        record: dict[str, object] = {
+            "label": label,
+            "text": label,
+            "text_source": "texte visible",
+            "tag_name": "a",
+            "href": f"https://sidjilcom.cnrc.dz{DEFAULT_ENTERPRISE_SEARCH_ROUTE}",
+            "href_allowed": True,
+            "has_href_parameters": False,
+            "visible": True,
+            "enabled": True,
+            "clickable": True,
+            "selector": f"a:nth-of-type({index})",
+            "parent": "nav.mode-choice",
+            "context": "conteneur partagé nav.mode-choice",
+            "paired_context": True,
+            "in_portlet": False,
+        }
+        record.update(overrides)
+        return record
 
     def __init__(self) -> None:
         self.clicks: list[str] = []
         self.stability_waits = 0
         self.portlet_only_flags: list[bool] = []
-        self.portlet_selectors: list[str] = []
-        self.portlet_count = 1
         self.mode = ""
         self.hide_legal_after_physical = False
+        self.mode_candidates: dict[str, list[dict[str, object]]] = {
+            SEARCH_MODE_LABELS[0]: [self._candidate(SEARCH_MODE_LABELS[0], 1)],
+            SEARCH_MODE_LABELS[1]: [self._candidate(SEARCH_MODE_LABELS[1], 2)],
+        }
         self.snapshots = {
             "PERSONNES PHYSIQUES": {
                 "scope_found": True,
@@ -357,19 +403,25 @@ class _ModeFrame:
         }
 
     @property
-    def mode_links(self) -> tuple[str, ...]:
-        if self.hide_legal_after_physical and self.mode == "PERSONNES PHYSIQUES":
-            return ("PERSONNES PHYSIQUES",)
-        return ("PERSONNES PHYSIQUES", "PERSONNES MORALES")
+    def available_modes(self) -> tuple[str, ...]:
+        available = []
+        for label, candidates in self.mode_candidates.items():
+            if label == SEARCH_MODE_LABELS[1] and self.hide_legal_after_physical and self.mode == SEARCH_MODE_LABELS[0]:
+                continue
+            if candidates:
+                available.append(label)
+        return tuple(available)
 
-    def locator(self, selector: str) -> _ModePortlet:
-        self.portlet_selectors.append(selector)
-        return _ModePortlet(self)
-
-    def get_by_role(self, role: str, *, name: object) -> _ModeCandidates:
-        return _ModeCandidates(self, name) if role == "link" else _ModeCandidates(self, re.compile("$^"))
+    def locator(self, selector: str) -> _ModeLocator:
+        return _ModeLocator(self, selector)
 
     def evaluate(self, script: str, *args: object) -> object:
+        if script == SEARCH_MODE_CANDIDATES_SCRIPT:
+            return [
+                dict(candidate)
+                for label in self.available_modes
+                for candidate in self.mode_candidates[label]
+            ]
         if "MutationObserver" in script:
             self.stability_waits += 1
             return True
@@ -378,24 +430,92 @@ class _ModeFrame:
         return self.snapshots[self.mode]
 
 
+class SearchModeTextNormalizationTests(unittest.TestCase):
+    def test_exact_text_multiple_whitespace_case_and_nbsp_normalize_identically(self) -> None:
+        for text in (
+            "PERSONNES PHYSIQUES",
+            "PERSONNES   PHYSIQUES",
+            " personnes\n physiques ",
+            "Personnes" + chr(160) + "Physiques",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(normalize_search_mode_label(text), "personnes physiques")
+        self.assertNotEqual(normalize_search_mode_label("PERSONNES physiques complémentaires"), "personnes physiques")
+        self.assertNotEqual(normalize_search_mode_label("PERSONNES"), "personnes physiques")
+        self.assertNotEqual(normalize_search_mode_label("PHYSIQUES"), "personnes physiques")
+        self.assertNotEqual(normalize_search_mode_label("MORALES"), "personnes morales")
+
+    def test_text_spread_across_fixture_html_children_is_normalized(self) -> None:
+        class VisibleText(HTMLParser):
+            def __init__(self) -> None:
+                super().__init__(convert_charrefs=True)
+                self.links: list[str] = []
+                self.current: list[str] | None = None
+
+            def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+                if tag == "a" and self.current is None:
+                    self.current = []
+
+            def handle_endtag(self, tag: str) -> None:
+                if tag == "a" and self.current is not None:
+                    self.links.append("".join(self.current))
+                    self.current = None
+
+            def handle_data(self, data: str) -> None:
+                if self.current is not None:
+                    self.current.append(data)
+
+        fixture = Path(__file__).parent / "fixtures" / "sidjilcom_mode_choices.html"
+        parser = VisibleText()
+        parser.feed(fixture.read_text(encoding="utf-8"))
+        self.assertIn("personnes physiques", [normalize_search_mode_label(text) for text in parser.links])
+
+
 class SearchModeAnalysisTests(unittest.TestCase):
-    def test_only_exact_mode_links_are_clicked_once_and_snapshots_are_compared(self) -> None:
-        frame = _ModeFrame()
+    def _browser(self, frame: _ModeFrame) -> PlaywrightBrowser:
         page = Mock()
         page.url = frame.url
         page.title.return_value = "Trouver une entreprise"
         page.frames = [frame]
+        page.main_frame = frame
         page.get_by_role.return_value = _EmptyLinks()
         browser = PlaywrightBrowser()
         browser._page = page
+        return browser
+
+    @staticmethod
+    def _candidate(label: str, frame: object, selector: str, **overrides: object) -> _SearchModeCandidate:
+        values: dict[str, object] = {
+            "label": label,
+            "frame": frame,
+            "selector": selector,
+            "text": label,
+            "text_source": "texte visible",
+            "tag_name": "a",
+            "href": f"https://sidjilcom.cnrc.dz{DEFAULT_ENTERPRISE_SEARCH_ROUTE}",
+            "href_allowed": True,
+            "has_href_parameters": False,
+            "visible": True,
+            "enabled": True,
+            "clickable": True,
+            "parent": "nav.mode-choice",
+            "context": "conteneur partagé nav.mode-choice",
+            "paired_context": True,
+            "in_portlet": False,
+            "frame_name": "Document principal",
+        }
+        values.update(overrides)
+        return _SearchModeCandidate(**values)
+
+    def test_simultaneous_modes_are_clicked_once_and_diagnostics_are_reported(self) -> None:
+        frame = _ModeFrame()
+        browser = self._browser(frame)
 
         result = browser.diagnose_search_modes(SessionConfig(url=DEFAULT_SIDJILCOM_URL))
 
         self.assertEqual(frame.clicks, ["PERSONNES PHYSIQUES", "PERSONNES MORALES"])
         self.assertEqual(frame.stability_waits, 2)
         self.assertEqual(frame.portlet_only_flags, [True, True])
-        self.assertEqual(len(frame.portlet_selectors), 2)
-        self.assertTrue(all("RechercheDetailleePortlet" in selector for selector in frame.portlet_selectors))
         self.assertIn("===== PERSONNES PHYSIQUES =====", result.report)
         self.assertIn("===== PERSONNES MORALES =====", result.report)
         self.assertIn("PORTLET PARENT", result.report)
@@ -404,64 +524,121 @@ class SearchModeAnalysisTests(unittest.TestCase):
         self.assertIn("Spécifiques physiques : registration_number", result.report)
         self.assertIn("Spécifiques morales : company_name", result.report)
         self.assertIn("aucun bouton de recherche activé", result.report)
+        self.assertIn("CANDIDATS PERSONNES PHYSIQUES : 1", result.report)
+        self.assertIn("CANDIDATS PERSONNES MORALES : 1", result.report)
+        self.assertIn("raison du choix", result.report)
         self.assertNotIn(".click(", inspect.getsource(PlaywrightBrowser.diagnostics))
+
+    def test_candidates_are_not_restricted_to_the_original_portlet_marker(self) -> None:
+        frame = _ModeFrame()
+        browser = self._browser(frame)
+        result = browser.diagnose_search_modes(SessionConfig(url=DEFAULT_SIDJILCOM_URL))
+        self.assertIn("CANDIDATS PERSONNES PHYSIQUES : 1", result.report)
+        self.assertTrue(all(not item["in_portlet"] for records in frame.mode_candidates.values() for item in records))
+
+    def test_multiple_candidates_prefer_visible_paired_and_internal_link(self) -> None:
+        frame = object()
+        label = SEARCH_MODE_LABELS[0]
+        candidates = [
+            self._candidate(label, frame, "a:nth-of-type(1)", visible=False, paired_context=True),
+            self._candidate(label, frame, "a:nth-of-type(2)", paired_context=False,
+                            parent="nav.utility", context="parent proche nav.utility"),
+            self._candidate(label, frame, "a:nth-of-type(3)", paired_context=True,
+                            parent="nav.mode-choice", context="conteneur partagé nav.mode-choice"),
+        ]
+        chosen, reason = PlaywrightBrowser._choose_search_mode_candidate(candidates)
+        self.assertEqual(chosen.selector, "a:nth-of-type(3)")
+        self.assertIn("préféré parmi 3 candidats", reason)
+        report = PlaywrightBrowser._format_mode_candidate_report(
+            {SEARCH_MODE_LABELS[0]: candidates, SEARCH_MODE_LABELS[1]: []},
+            {SEARCH_MODE_LABELS[0]: (chosen, reason), SEARCH_MODE_LABELS[1]: (None, "absent")},
+        )
+        self.assertIn("CANDIDATS PERSONNES PHYSIQUES : 3", report)
+        self.assertIn("visible=non", report)
+
+    def test_different_internal_hrefs_without_distinguishing_context_are_reported_ambiguous(self) -> None:
+        frame = object()
+        label = SEARCH_MODE_LABELS[1]
+        candidates = [
+            self._candidate(label, frame, "a:nth-of-type(1)", href="https://sidjilcom.cnrc.dz/mode/one",
+                            paired_context=False, parent="div.choices", context="parent proche div.choices"),
+            self._candidate(label, frame, "a:nth-of-type(2)", href="https://sidjilcom.cnrc.dz/mode/two",
+                            paired_context=False, parent="div.choices", context="parent proche div.choices"),
+        ]
+        chosen, reason = PlaywrightBrowser._choose_search_mode_candidate(candidates)
+        self.assertIsNone(chosen)
+        self.assertIn("href ou contexte DOM distinct", reason)
+        report = PlaywrightBrowser._format_mode_candidate_report(
+            {SEARCH_MODE_LABELS[0]: [], SEARCH_MODE_LABELS[1]: candidates},
+            {SEARCH_MODE_LABELS[0]: (None, "absent"), SEARCH_MODE_LABELS[1]: (chosen, reason)},
+        )
+        self.assertIn("CANDIDATS PERSONNES MORALES : 2", report)
+        self.assertIn("mode/one", report)
+        self.assertIn("mode/two", report)
+
+    def test_absent_both_modes_reports_zero_candidates_and_clicks_nothing(self) -> None:
+        frame = _ModeFrame()
+        frame.mode_candidates = {label: [] for label in SEARCH_MODE_LABELS}
+        browser = self._browser(frame)
+
+        with self.assertRaises(SearchModeAnalysisError) as caught:
+            browser.diagnose_search_modes(SessionConfig(url=DEFAULT_SIDJILCOM_URL))
+
+        self.assertEqual(frame.clicks, [])
+        self.assertIn("MODE PERSONNES PHYSIQUES", str(caught.exception))
+        self.assertIn("MODE PERSONNES MORALES", str(caught.exception))
+        self.assertIn("CANDIDATS PERSONNES PHYSIQUES : 0", str(caught.exception))
+        self.assertIn("CANDIDATS PERSONNES MORALES : 0", str(caught.exception))
 
     def test_second_mode_reloads_initial_route_if_first_selection_hides_its_link(self) -> None:
         frame = _ModeFrame()
         frame.hide_legal_after_physical = True
-        page = Mock()
-        page.url = frame.url
-        page.title.return_value = "Trouver une entreprise"
-        page.frames = [frame]
-        page.main_frame = frame
-        page.get_by_role.return_value = _EmptyLinks()
-        page.goto.side_effect = lambda *_args, **_kwargs: setattr(frame, "mode", "")
-        browser = PlaywrightBrowser()
-        browser._page = page
+        browser = self._browser(frame)
+        browser._page.goto.side_effect = lambda *_args, **_kwargs: setattr(frame, "mode", "")
 
         result = browser.diagnose_search_modes(SessionConfig(url=DEFAULT_SIDJILCOM_URL))
 
         self.assertEqual(frame.clicks, ["PERSONNES PHYSIQUES", "PERSONNES MORALES"])
-        self.assertEqual(page.goto.call_count, 1)
+        self.assertEqual(browser._page.goto.call_count, 1)
         self.assertIn("===== PERSONNES MORALES =====", result.report)
 
-    def test_mode_analyzer_refuses_ambiguous_portlet_scope_before_clicking_links(self) -> None:
-        frame = _ModeFrame()
-        frame.portlet_count = 2
-        page = Mock()
-        page.url = frame.url
-        page.title.return_value = "Trouver une entreprise"
-        page.frames = [frame]
-        page.main_frame = frame
-        page.get_by_role.return_value = _EmptyLinks()
-        browser = PlaywrightBrowser()
-        browser._page = page
+    def test_submit_and_reset_buttons_are_not_clickable_mode_candidates(self) -> None:
+        label = SEARCH_MODE_LABELS[0]
+        candidate = self._candidate(label, object(), "button:nth-of-type(1)",
+                                    tag_name="button", clickable=False)
+        chosen, reason = PlaywrightBrowser._choose_search_mode_candidate([candidate])
+        self.assertIsNone(chosen)
+        self.assertIn("visible, activé, cliquable", reason)
 
-        with self.assertRaises(SearchModeAnalysisError):
+    def test_external_href_candidates_are_not_clicked(self) -> None:
+        frame = _ModeFrame()
+        for records in frame.mode_candidates.values():
+            for record in records:
+                record["href"] = "https://example.org/[chemin masqué]"
+                record["href_allowed"] = False
+        browser = self._browser(frame)
+        with self.assertRaises(SearchModeAnalysisError) as caught:
             browser.diagnose_search_modes(SessionConfig(url=DEFAULT_SIDJILCOM_URL))
         self.assertEqual(frame.clicks, [])
+        self.assertNotIn("token", str(caught.exception).casefold())
 
-    def test_mode_analyzer_refuses_untrusted_or_parameterized_mode_links(self) -> None:
-        invalid_hrefs = (
-            "https://example.org/collect?token=DO-NOT-LEAK",
-            "https://sidjilcom.cnrc.dz/fr/group/sidjilcom/repertoire-des-commercants?token=DO-NOT-LEAK",
-            "https://user:secret@sidjilcom.cnrc.dz/fr/group/sidjilcom/repertoire-des-commercants",
-        )
-        for href in invalid_hrefs:
-            with self.subTest(href=href):
-                frame = _ModeFrame()
-                frame.mode_link_href = href
-                page = Mock()
-                page.url = frame.url
-                page.title.return_value = "Trouver une entreprise"
-                page.frames = [frame]
-                page.get_by_role.return_value = _EmptyLinks()
-                browser = PlaywrightBrowser()
-                browser._page = page
+    def test_href_parameters_are_never_included_in_candidate_report(self) -> None:
+        frame = _ModeFrame()
+        frame.mode_candidates[SEARCH_MODE_LABELS[0]][0]["has_href_parameters"] = True
+        browser = self._browser(frame)
+        result = browser.diagnose_search_modes(SessionConfig(url=DEFAULT_SIDJILCOM_URL))
+        self.assertIn("paramètres/fragment omis", result.report)
+        self.assertNotIn("?token", result.report.casefold())
 
-                with self.assertRaises(SearchModeAnalysisError):
-                    browser.diagnose_search_modes(SessionConfig(url=DEFAULT_SIDJILCOM_URL))
-                self.assertEqual(frame.clicks, [])
+    def test_accessible_child_text_and_candidate_counts_appear_in_report(self) -> None:
+        frame = _ModeFrame()
+        frame.mode_candidates[SEARCH_MODE_LABELS[0]][0]["text_source"] = "texte des éléments enfants"
+        frame.mode_candidates[SEARCH_MODE_LABELS[0]][0]["text"] = "Personnes   Physiques"
+        browser = self._browser(frame)
+        result = browser.diagnose_search_modes(SessionConfig(url=DEFAULT_SIDJILCOM_URL))
+        self.assertIn("Personnes Physiques", result.report)
+        self.assertIn("source du texte : texte des éléments enfants", result.report)
+        self.assertIn("CANDIDATS PERSONNES PHYSIQUES : 1", result.report)
 
 
 class _MockFrame:

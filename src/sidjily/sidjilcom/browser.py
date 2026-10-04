@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -52,10 +53,215 @@ class SearchModeAnalysisError(RuntimeError):
 
 
 SEARCH_MODE_PORTLET_MARKER = "dz_cnrc_sidjilcom_recherchedetaillee_portlet_RechercheDetailleePortlet"
-SEARCH_MODE_PORTLET_SELECTOR = (
-    f'[id*="{SEARCH_MODE_PORTLET_MARKER}"], '
-    f'[class*="{SEARCH_MODE_PORTLET_MARKER}"]'
-)
+SEARCH_MODE_LABELS = ("PERSONNES PHYSIQUES", "PERSONNES MORALES")
+
+
+@dataclass(frozen=True, slots=True)
+class _SearchModeCandidate:
+    label: str
+    frame: Any
+    selector: str
+    text: str
+    text_source: str
+    tag_name: str
+    href: str
+    href_allowed: bool
+    has_href_parameters: bool
+    visible: bool
+    enabled: bool
+    clickable: bool
+    parent: str
+    context: str
+    paired_context: bool
+    in_portlet: bool
+    frame_name: str
+
+
+def normalize_search_mode_label(text: object) -> str:
+    """Normalise espaces Unicode, contenu multiligne et casse pour comparer un libellé exact."""
+    normalized = unicodedata.normalize("NFKC", str(text or ""))
+    return " ".join(normalized.split()).casefold()
+
+
+def _safe_search_mode_href(href: str, config: SessionConfig) -> str:
+    """N'émet jamais query/fragment ni segment de chemin ressemblant à un identifiant."""
+    sanitized = sanitize_current_url(href, config.url)
+    parsed = urlsplit(sanitized)
+    if re.search(r"token|session|auth|secret|csrf|cookie|password|credential|email|phone|\d{6,}|[A-Fa-f0-9]{32,}", parsed.path, re.IGNORECASE):
+        return f"{parsed.scheme}://{parsed.netloc}/[chemin masqué]"
+    return sanitized
+
+
+SEARCH_MODE_CANDIDATES_SCRIPT = r"""({labels, portletMarker}) => {
+    const normalize = value => String(value || '').normalize('NFKC')
+        .replace(/[\u00a0\u2000-\u200a\u202f\u205f\u3000]/g, ' ')
+        .replace(/\s+/gu, ' ').trim().toLocaleUpperCase('fr');
+    const expected = new Map(labels.map(label => [normalize(label), label]));
+    const interactiveSelector = 'a, area, button, [role="link"], [role="button"], [role="tab"], ' +
+        '[role="menuitem"], [role="option"], [onclick], [tabindex]:not([tabindex="-1"])';
+    const safeToken = value => {
+        const text = String(value || '');
+        return text.length <= 60 && /^[A-Za-z][A-Za-z0-9_:-]*$/.test(text) &&
+            !/(token|session|auth|secret|csrf|cookie|password|credential|user|account|profile|email|phone|personal)/i.test(text) &&
+            !/\d{6,}/.test(text);
+    };
+    const describe = element => {
+        if (!element || element.nodeType !== Node.ELEMENT_NODE) return 'inconnu';
+        const tag = element.tagName.toLowerCase();
+        const classes = Array.from(element.classList || [])
+            .filter(name => safeToken(name) && /(mode|choice|tab|link|nav|menu|portlet|search|button|btn|container|wrapper|panel|item|active|option)/i.test(name))
+            .slice(0, 2).map(name => `.${name}`).join('');
+        return `${tag}${classes}`;
+    };
+    const selectorFor = element => {
+        const parts = [];
+        let current = element;
+        while (current && current.nodeType === Node.ELEMENT_NODE && parts.length < 32) {
+            const tag = current.tagName.toLowerCase();
+            let position = 1;
+            for (let sibling = current.previousElementSibling; sibling; sibling = sibling.previousElementSibling) {
+                if (sibling.tagName === current.tagName) position++;
+            }
+            parts.unshift(`${tag}:nth-of-type(${position})`);
+            if (tag === 'html') break;
+            current = current.parentElement;
+        }
+        return parts.join(' > ');
+    };
+    const visible = element => {
+        let current = element;
+        while (current && current.nodeType === Node.ELEMENT_NODE) {
+            const style = window.getComputedStyle(current);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0' ||
+                current.hasAttribute('hidden') || current.getAttribute('aria-hidden') === 'true') return false;
+            current = current.parentElement;
+        }
+        return !!element.getClientRects().length;
+    };
+    const labelFor = element => {
+        const rendered = normalize(element.innerText || '');
+        if (expected.has(rendered)) return {label: expected.get(rendered), source: 'texte visible'};
+        const textContent = normalize(element.textContent || '');
+        if (expected.has(textContent)) return {label: expected.get(textContent), source: 'texte des éléments enfants'};
+        const aria = normalize(element.getAttribute('aria-label') || '');
+        if (expected.has(aria)) return {label: expected.get(aria), source: 'aria-label'};
+        const title = normalize(element.getAttribute('title') || '');
+        if (expected.has(title)) return {label: expected.get(title), source: 'title accessible'};
+        const alt = normalize(element.getAttribute('alt') || '');
+        if (expected.has(alt)) return {label: expected.get(alt), source: 'texte alternatif accessible'};
+        const labelledBy = (element.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+            .map(id => document.getElementById(id)?.innerText || '').join(' ');
+        const accessible = normalize(labelledBy);
+        if (expected.has(accessible)) return {label: expected.get(accessible), source: 'aria-labelledby'};
+        return null;
+    };
+    const cursorTarget = element => {
+        let current = element;
+        for (let depth = 0; current && depth < 5; depth++, current = current.parentElement) {
+            if (window.getComputedStyle(current).cursor === 'pointer') return current;
+        }
+        return null;
+    };
+    const candidates = new Map(labels.map(label => [label, new Map()]));
+    const add = (target, label, source) => {
+        const map = candidates.get(label);
+        if (!map || map.has(target)) return;
+        let href = '';
+        let hrefAllowed = true;
+        let hasHrefParameters = false;
+        if (target instanceof HTMLAnchorElement || target instanceof HTMLAreaElement) {
+            if (target.hasAttribute('href')) {
+                const credentialMarker = target.matches('[href*="@"], [href*="%40" i]');
+                const protocol = target.protocol.toLowerCase();
+                const hostname = target.hostname.toLowerCase();
+                const port = target.port;
+                const internal = protocol === 'https:' && hostname === 'sidjilcom.cnrc.dz' &&
+                    (!port || port === '443') && !credentialMarker;
+                hrefAllowed = internal;
+                hasHrefParameters = target.matches('[href*="?"], [href*="#"]');
+                href = internal
+                    ? `${protocol}//${hostname}${target.pathname}`
+                    : `${protocol}//${hostname || '[hôte masqué]'}/[chemin masqué]`;
+            }
+        } else if (target.hasAttribute('href')) {
+            // Un href non standard n'est pas extrait; seuls les liens HTML standard sont validés.
+            hrefAllowed = false;
+            hasHrefParameters = target.matches('[href*="?"], [href*="#"]');
+            href = '[href non standard masqué]';
+        }
+        const disabled = !!target.disabled || target.matches(':disabled') ||
+            target.getAttribute('aria-disabled') === 'true' ||
+            !!target.closest('[aria-disabled="true"]');
+        const tag = target.tagName.toLowerCase();
+        const role = (target.getAttribute('role') || '').toLowerCase();
+        const buttonType = (target.getAttribute('type') || 'submit').toLowerCase();
+        const inputType = (target.getAttribute('type') || 'text').toLowerCase();
+        const forbiddenFormButton = (tag === 'button' && ['submit', 'reset'].includes(buttonType)) ||
+            (tag === 'input' && ['submit', 'reset', 'image'].includes(inputType));
+        const nativeClickTarget = (tag === 'a' || tag === 'area') && target.hasAttribute('href') ||
+            tag === 'button' && !forbiddenFormButton;
+        const handlerClickTarget = target.hasAttribute('onclick') ||
+            (target.hasAttribute('tabindex') && Number(target.getAttribute('tabindex')) >= 0) ||
+            ['link', 'button', 'tab', 'menuitem', 'option'].includes(role) ||
+            window.getComputedStyle(target).cursor === 'pointer';
+        const reallyClickable = !forbiddenFormButton && (nativeClickTarget || handlerClickTarget);
+        if (!reallyClickable) return;
+        const portlet = target.closest(`[id*="${portletMarker}"], [class*="${portletMarker}"]`);
+        map.set(target, {
+            label, text: label, text_source: source,
+            tag_name: tag, href, href_allowed: hrefAllowed,
+            has_href_parameters: hasHrefParameters, visible: visible(target), enabled: !disabled,
+            clickable: true, selector: selectorFor(target), parent: describe(target.parentElement),
+            context: `parent proche ${describe(target.parentElement)}`,
+            paired_context: false, in_portlet: !!portlet, _target: target
+        });
+    };
+
+    const targets = new Set(document.querySelectorAll(interactiveSelector));
+    // Rechercher également les zones pointer sans role/onClick explicite, sans lire le texte
+    // général de la page : seuls les candidats interactifs et leurs descendants sont inspectés.
+    for (const element of document.querySelectorAll('*')) {
+        if (window.getComputedStyle(element).cursor !== 'pointer') continue;
+        const parent = element.parentElement;
+        if (!parent || window.getComputedStyle(parent).cursor !== 'pointer') targets.add(element);
+    }
+    for (const target of targets) {
+        const ownMatch = labelFor(target);
+        const children = Array.from(target.querySelectorAll('*'));
+        const childMatches = children.map(child => ({child, match: labelFor(child)}))
+            .filter(item => item.match);
+        const targetIsSemantic = target.matches(interactiveSelector);
+        const ownDuplicatedByChild = ownMatch && childMatches.some(item => item.match.label === ownMatch.label);
+        if (ownMatch && (targetIsSemantic || !ownDuplicatedByChild)) {
+            add(target, ownMatch.label, ownMatch.source);
+        }
+        for (const {child, match: childMatch} of childMatches) {
+            const clickTarget = child.closest(interactiveSelector) || cursorTarget(child) || target;
+            add(clickTarget, childMatch.label, childMatch.source);
+        }
+    }
+
+    for (const [label, map] of candidates) {
+        const counterpart = labels.find(other => other !== label);
+        const otherTargets = Array.from(candidates.get(counterpart).entries())
+            .filter(([_other, record]) => record.clickable)
+            .map(([other]) => other);
+        for (const [target, record] of map) {
+            let ancestor = target.parentElement;
+            for (let depth = 0; ancestor && depth < 6; depth++, ancestor = ancestor.parentElement) {
+                const tag = ancestor.tagName.toLowerCase();
+                if (tag === 'body' || tag === 'html') break;
+                if (otherTargets.some(other => ancestor.contains(other))) {
+                    record.paired_context = true;
+                    record.context = `conteneur partagé ${describe(ancestor)}`;
+                    break;
+                }
+            }
+            delete record._target;
+        }
+    }
+    return Array.from(candidates.values()).flatMap(map => Array.from(map.values()));
+}"""
 
 
 SEARCH_MODE_STABILITY_SCRIPT = r"""async () => {
@@ -614,46 +820,173 @@ class PlaywrightBrowser:
             portlet_scopes=tuple(portlet_scopes),
         )
 
-    def _search_mode_link(self, label: str, config: SessionConfig) -> tuple[Any, Any]:
+    def _discover_search_mode_candidates(
+        self, config: SessionConfig
+    ) -> dict[str, list[_SearchModeCandidate]]:
         if self._page is None:
             raise SearchModeAnalysisError("Navigateur non démarré.")
-        pattern = re.compile(rf"^\s*{re.escape(label)}\s*$", re.IGNORECASE)
-        matches: list[tuple[Any, Any]] = []
-        for frame in list(self._page.frames):
+        found: dict[str, list[_SearchModeCandidate]] = {label: [] for label in SEARCH_MODE_LABELS}
+        for frame_index, frame in enumerate(list(self._page.frames)):
+            fallback_name = "Document principal" if frame_index == 0 else f"Frame {frame_index}"
             try:
-                portlet = frame.locator(SEARCH_MODE_PORTLET_SELECTOR)
-                if portlet.count() != 1:
+                frame_name = fallback_name
+                raw_candidates = frame.evaluate(
+                    SEARCH_MODE_CANDIDATES_SCRIPT,
+                    {"labels": list(SEARCH_MODE_LABELS), "portletMarker": SEARCH_MODE_PORTLET_MARKER},
+                )
+                if not isinstance(raw_candidates, list):
                     continue
-                candidates = portlet.get_by_role("link", name=pattern)
-                count = candidates.count()
-                for index in range(min(count, 3)):
-                    candidate = candidates.nth(index)
-                    href = candidate.get_attribute("href") or ""
-                    if not href:
+                for raw in raw_candidates:
+                    if not isinstance(raw, dict):
                         continue
-                    destination = urljoin(frame.url, href)
-                    parsed = urlsplit(destination)
-                    tag_name = candidate.evaluate("element => element.tagName.toLowerCase()")
-                    try:
-                        allowed_port = parsed.port in (None, 443)
-                    except ValueError:
-                        allowed_port = False
-                    if (
-                        tag_name == "a"
-                        and is_portal_host(destination, config.url)
-                        and not parsed.username
-                        and not parsed.password
-                        and allowed_port
-                        and not parsed.query
-                        and not parsed.fragment
-                        and parsed.path.rstrip("/") == DEFAULT_ENTERPRISE_SEARCH_ROUTE.rstrip("/")
-                    ):
-                        matches.append((frame, candidate))
+                    label = raw.get("label")
+                    if label not in found:
+                        continue
+                    selector = raw.get("selector")
+                    if not isinstance(selector, str) or not selector:
+                        continue
+                    if any(item.frame is frame and item.selector == selector for item in found[label]):
+                        continue
+                    safe_href = str(raw.get("href") or "")
+                    if safe_href and safe_href.startswith(("https://", "http://")):
+                        safe_href = _safe_search_mode_href(safe_href, config)
+                    found[label].append(
+                        _SearchModeCandidate(
+                            label=label,
+                            frame=frame,
+                            selector=selector,
+                            text=sanitize_metadata_text(raw.get("text"), 80) or label,
+                            text_source=sanitize_metadata_text(raw.get("text_source"), 60) or "texte exact",
+                            tag_name=sanitize_metadata_text(raw.get("tag_name"), 40) or "inconnu",
+                            href=safe_href,
+                            href_allowed=bool(raw.get("href_allowed", False)),
+                            has_href_parameters=bool(raw.get("has_href_parameters", False)),
+                            visible=bool(raw.get("visible", False)),
+                            enabled=bool(raw.get("enabled", False)),
+                            clickable=bool(raw.get("clickable", False)),
+                            parent=sanitize_metadata_text(raw.get("parent"), 120) or "inconnu",
+                            context=sanitize_metadata_text(raw.get("context"), 160) or "inconnu",
+                            paired_context=bool(raw.get("paired_context", False)),
+                            in_portlet=bool(raw.get("in_portlet", False)),
+                            frame_name=frame_name,
+                        )
+                    )
             except Exception:
+                # Un frame inaccessible est ignoré, sans journaliser URL ou contenu.
                 continue
-        if len(matches) != 1:
-            raise SearchModeAnalysisError("Le lien exact du mode demandé est absent ou ambigu.")
-        return matches[0]
+        return found
+
+    @staticmethod
+    def _choose_search_mode_candidate(
+        candidates: list[_SearchModeCandidate],
+    ) -> tuple[_SearchModeCandidate | None, str]:
+        if not candidates:
+            return None, "Aucun élément ne porte le libellé complet exact."
+        eligible = [
+            item for item in candidates
+            if item.visible and item.enabled and item.clickable and item.href_allowed
+        ]
+        if not eligible:
+            return None, "Aucun candidat n'est à la fois visible, activé, cliquable et sûr selon son href."
+
+        # Les indices de conteneur commun et de destination sont des préférences seulement :
+        # ils ne sont jamais une condition obligatoire de détection.
+        paired = [item for item in eligible if item.paired_context]
+        if paired:
+            eligible = paired
+        in_portlet = [item for item in eligible if item.in_portlet]
+        if in_portlet:
+            eligible = in_portlet
+        tag_priority = {"a": 3, "area": 3, "button": 2}
+        best_priority = max(tag_priority.get(item.tag_name, 1) for item in eligible)
+        eligible = [item for item in eligible if tag_priority.get(item.tag_name, 1) == best_priority]
+
+        if len(eligible) == 1:
+            chosen = eligible[0]
+            reasons = ["visible, activé et cliquable", "href sûr"]
+            if chosen.paired_context:
+                reasons.append("même contexte DOM proche que l'autre mode")
+            if chosen.in_portlet:
+                reasons.append("dans le portlet attendu (indice facultatif)")
+            if len(candidates) > 1:
+                reasons.append(f"préféré parmi {len(candidates)} candidats après comparaison visibilité/contexte/href")
+            return chosen, "; ".join(reasons) + "."
+
+        destinations = {item.href for item in eligible}
+        contexts = {(id(item.frame), item.parent, item.context) for item in eligible}
+        if len(destinations) == 1 and len(contexts) == 1:
+            chosen = eligible[0]
+            return chosen, (
+                f"{len(eligible)} occurrences visibles ont le même href et le même contexte; "
+                "premier élément DOM retenu comme départage déterministe."
+            )
+        return None, (
+            f"{len(eligible)} candidats restent équivalents après comparaison; href ou contexte DOM distinct."
+        )
+
+    @staticmethod
+    def _format_mode_candidate_report(
+        candidates_by_label: dict[str, list[_SearchModeCandidate]],
+        choices: dict[str, tuple[_SearchModeCandidate | None, str]],
+    ) -> str:
+        lines = ["DIAGNOSTIC DE DÉTECTION DES MODES"]
+        for label in SEARCH_MODE_LABELS:
+            candidates = candidates_by_label.get(label, [])
+            chosen, reason = choices.get(label, (None, "Aucune décision."))
+            representative = chosen or (candidates[0] if candidates else None)
+            lines.extend((
+                f"\nMODE {label}",
+                f"- trouvé : {'oui' if candidates else 'non'}",
+                f"- texte : {representative.text if representative else label}",
+                f"- source du texte : {representative.text_source if representative else '—'}",
+                f"- tag : {representative.tag_name if representative else '—'}",
+                f"- href : {(representative.href or 'non renseigné') if representative else '—'}",
+                f"- visible : {'oui' if representative and representative.visible else 'non' if representative else '—'}",
+                f"- enabled : {'oui' if representative and representative.enabled else 'non' if representative else '—'}",
+                f"- clickable : {'oui' if representative and representative.clickable else 'non' if representative else '—'}",
+                f"- parent proche : {representative.parent if representative else '—'}",
+                f"- contexte DOM minimal : {representative.context if representative else '—'}",
+                f"- raison du choix : {reason}",
+                f"CANDIDATS {label} : {len(candidates)}",
+            ))
+            for index, item in enumerate(candidates, start=1):
+                href = item.href or "non renseigné"
+                if item.has_href_parameters:
+                    href += " (paramètres/fragment omis)"
+                lines.append(
+                    f"  {index}. texte={item.text}; tag={item.tag_name}; href={href}; "
+                    f"visible={'oui' if item.visible else 'non'}; enabled={'oui' if item.enabled else 'non'}; "
+                    f"clickable={'oui' if item.clickable else 'non'}; frame={item.frame_name}; "
+                    f"parent={item.parent}; contexte={item.context}"
+                )
+        return "\n".join(lines)
+
+    def _click_mode_candidate(self, candidate: _SearchModeCandidate, config: SessionConfig) -> None:
+        try:
+            current = candidate.frame.evaluate(
+                SEARCH_MODE_CANDIDATES_SCRIPT,
+                {"labels": list(SEARCH_MODE_LABELS), "portletMarker": SEARCH_MODE_PORTLET_MARKER},
+            )
+            still_matches = isinstance(current, list) and any(
+                isinstance(item, dict)
+                and item.get("label") == candidate.label
+                and item.get("selector") == candidate.selector
+                and item.get("visible") is True
+                and item.get("enabled") is True
+                and item.get("clickable") is True
+                and item.get("href_allowed") is True
+                for item in current
+            )
+            if not still_matches:
+                raise SearchModeAnalysisError("Le candidat a changé ou n'est plus visible/activé.")
+            locator = candidate.frame.locator(candidate.selector)
+            if locator.count() != 1 or not locator.is_visible() or not locator.is_enabled():
+                raise SearchModeAnalysisError("Le candidat a changé ou n'est plus visible/activé.")
+            locator.click(timeout=min(config.navigation_timeout_ms, 8_000))
+        except SearchModeAnalysisError:
+            raise
+        except Exception:
+            raise SearchModeAnalysisError("Le lien du mode a été identifié mais son clic n'a pas abouti.") from None
 
     @staticmethod
     def _wait_for_search_portlet(frame: Any) -> None:
@@ -664,20 +997,45 @@ class PlaywrightBrowser:
         if not stable:
             raise SearchModeAnalysisError("Le contenu du portlet n'a pas été stabilisé dans le délai prévu.")
 
-    def _capture_search_mode(self, label: str, config: SessionConfig) -> PageDiagnostics:
-        frame, link = self._search_mode_link(label, config)
+    def _capture_search_mode(
+        self,
+        label: str,
+        config: SessionConfig,
+        candidate: _SearchModeCandidate | None = None,
+        diagnostic_report: str = "",
+    ) -> PageDiagnostics:
+        if candidate is None:
+            candidates = self._discover_search_mode_candidates(config)
+            candidate, reason = self._choose_search_mode_candidate(candidates.get(label, []))
+            diagnostic_report = self._format_mode_candidate_report(
+                candidates,
+                {label: (candidate, reason)},
+            )
+            if candidate is None:
+                raise SearchModeAnalysisError(
+                    "Le mode demandé n'a pas de candidat cliquable non ambigu.\n" + diagnostic_report
+                )
         try:
-            link.click(timeout=min(config.navigation_timeout_ms, 8_000))
+            self._click_mode_candidate(candidate, config)
+        except SearchModeAnalysisError as exc:
+            raise SearchModeAnalysisError(f"{exc}\n\n{diagnostic_report}") from None
+        try:
+            self._wait_for_search_portlet(candidate.frame)
+            snapshot = self.diagnostics(config, portlet_only=True)
+        except SearchModeAnalysisError as exc:
+            raise SearchModeAnalysisError(f"{exc}\n\n{diagnostic_report}") from None
         except Exception:
-            raise SearchModeAnalysisError("La sélection du mode demandé a échoué.") from None
-        self._wait_for_search_portlet(frame)
-        snapshot = self.diagnostics(config, portlet_only=True)
+            raise SearchModeAnalysisError(
+                "La capture structurelle après le clic n'a pas abouti.\n\n" + diagnostic_report
+            ) from None
         if not snapshot.portlet_scope_found:
-            raise SearchModeAnalysisError("Le portlet de recherche n'a pas été identifié dans le document.")
+            raise SearchModeAnalysisError(
+                "Le portlet de recherche n'a pas été identifié après sélection du mode.\n\n" + diagnostic_report
+            )
         return snapshot
 
     def diagnose_search_modes(self, config: SessionConfig) -> PageDiagnostics:
-        """Sélectionne une fois chaque mode et compare ses métadonnées sans soumettre le formulaire."""
+        """Identifie les libellés visibles, puis analyse les deux modes sans soumettre de recherche."""
         if self._page is None:
             raise SearchModeAnalysisError("Navigateur non démarré.")
         current = urlsplit(self._page.url)
@@ -687,22 +1045,43 @@ class PlaywrightBrowser:
         ):
             raise SearchModeAnalysisError("Ouvrez la page Trouver une entreprise avant l'analyse des modes.")
 
-        physical = self._capture_search_mode("PERSONNES PHYSIQUES", config)
+        candidates = self._discover_search_mode_candidates(config)
+        choices = {
+            label: self._choose_search_mode_candidate(candidates.get(label, []))
+            for label in SEARCH_MODE_LABELS
+        }
+        detection_report = self._format_mode_candidate_report(candidates, choices)
+        if any(candidate is None for candidate, _reason in choices.values()):
+            raise SearchModeAnalysisError(
+                "Détection incomplète ou ambiguë; aucun mode n'a été cliqué.\n\n" + detection_report
+            )
+
+        physical_choice = choices[SEARCH_MODE_LABELS[0]][0]
+        legal_choice = choices[SEARCH_MODE_LABELS[1]][0]
+        assert physical_choice is not None and legal_choice is not None
+        physical = self._capture_search_mode(
+            SEARCH_MODE_LABELS[0], config, physical_choice, detection_report
+        )
         try:
-            legal = self._capture_search_mode("PERSONNES MORALES", config)
+            legal = self._capture_search_mode(
+                SEARCH_MODE_LABELS[1], config, legal_choice, detection_report
+            )
         except SearchModeAnalysisError:
-            # Les portlets peuvent remplacer la navigation de choix. Recharger la route connue
-            # restaure le point de départ sans lire ni modifier l'état des champs.
+            # Une sélection peut remplacer le menu. Recharger seulement la route visible
+            # autorisée puis redétecter le second lien; aucun endpoint/API n'est appelé.
             try:
                 self._page.goto(
                     urljoin(config.url, DEFAULT_ENTERPRISE_SEARCH_ROUTE),
                     wait_until="domcontentloaded",
                     timeout=config.navigation_timeout_ms,
                 )
-                self._wait_for_search_portlet(self._page.main_frame)
-                legal = self._capture_search_mode("PERSONNES MORALES", config)
+                legal = self._capture_search_mode(
+                    SEARCH_MODE_LABELS[1], config, diagnostic_report=detection_report
+                )
             except Exception:
-                raise SearchModeAnalysisError("Le second mode n'a pas pu être analysé.") from None
+                raise SearchModeAnalysisError(
+                    "Le second mode n'a pas pu être analysé.\n\n" + detection_report
+                ) from None
 
         comparison = format_search_mode_comparison(
             physical.form_diagnostics, legal.form_diagnostics
@@ -710,6 +1089,7 @@ class PlaywrightBrowser:
         report = (
             "ANALYSE DES FORMULAIRES SIDJILCOM\n"
             "Sélection des deux modes seulement; aucun critère saisi et aucun bouton de recherche activé.\n\n"
+            f"{detection_report}\n\n"
             "===== PERSONNES PHYSIQUES =====\n"
             f"{physical.report}\n\n"
             "===== PERSONNES MORALES =====\n"
