@@ -52,6 +52,10 @@ class FakeBrowser:
         self.route_on_search_navigation = False
         self.dashboard_calls = 0
         self.search_mode_calls = 0
+        self.diagnostics_calls = 0
+        self.autocomplete_prepare_calls = 0
+        self.autocomplete_select_calls = 0
+        self.autocomplete_reset_calls = 0
         self.navigation_evidence = PageEvidence(True, False, False, False, True)
         self.dashboard_evidence = PageEvidence(True, False, False, False, False, True)
         self.page_diagnostics = PageDiagnostics(
@@ -102,11 +106,26 @@ class FakeBrowser:
         )
 
     def diagnostics(self, _config: SessionConfig) -> PageDiagnostics:
+        self.diagnostics_calls += 1
         return self.page_diagnostics
 
     def diagnose_search_modes(self, _config: SessionConfig) -> PageDiagnostics:
         self.search_mode_calls += 1
         return self.page_diagnostics
+
+    def prepare_autocomplete_test(self, _config: SessionConfig, _field_id: str, _query: str) -> object:
+        self.autocomplete_prepare_calls += 1
+        return "simulated-observation"
+
+    def select_autocomplete_suggestion(
+        self, _config: SessionConfig, _token: str, _suggestion_index: int
+    ) -> object:
+        self.autocomplete_select_calls += 1
+        return "simulated-selection"
+
+    def reset_autocomplete_test(self, _config: SessionConfig, _token: str) -> object:
+        self.autocomplete_reset_calls += 1
+        return "simulated-reset"
 
     def close(self) -> None:
         self.closed.set()
@@ -349,6 +368,34 @@ class SessionManagerTests(unittest.TestCase):
             self.assertEqual(report.page.section, "Trouver une entreprise")
             self.assertIn("Raison Sociale", report.page.visible_fields[0])
             self.assertTrue(manager.config.connected_marker_path.is_file())
+
+    def test_autocomplete_operations_require_connected_session_and_never_run_search(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser = FakeBrowser(PageEvidence(True, False, True, False, True))
+            manager = self.make_manager(browser, temp_dir)
+            manager.connect()
+            self.assertTrue(browser.opened.wait(1))
+            self.wait_for_state(manager, SessionState.CONNECTED)
+
+            self.assertEqual(manager.prepare_autocomplete_test("activite", "test").result(timeout=1), "simulated-observation")
+            self.assertEqual(manager.select_autocomplete_suggestion("token", 0).result(timeout=1), "simulated-selection")
+            self.assertEqual(manager.reset_autocomplete_test("token").result(timeout=1), "simulated-reset")
+            self.assertEqual(browser.autocomplete_prepare_calls, 1)
+            self.assertEqual(browser.autocomplete_select_calls, 1)
+            self.assertEqual(browser.autocomplete_reset_calls, 1)
+            self.assertEqual(browser.search_calls, 0)
+            self.assertEqual(browser.search_mode_calls, 0)
+            self.assertEqual(browser.diagnostics_calls, 0)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser = FakeBrowser(PageEvidence(True, True, False, False))
+            manager = self.make_manager(browser, temp_dir)
+            manager.connect()
+            self.assertTrue(browser.opened.wait(1))
+            self.wait_for_state(manager, SessionState.WAITING_FOR_LOGIN)
+            with self.assertRaises(SessionNotConnected):
+                manager.prepare_autocomplete_test("activite", "test").result(timeout=1)
+            self.assertEqual(browser.autocomplete_prepare_calls, 0)
 
     def test_search_mode_analysis_requires_authenticated_search_page_and_never_submits(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

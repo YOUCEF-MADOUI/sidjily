@@ -7,6 +7,12 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 from sidjily.models import Search, Status
+from sidjily.sidjilcom.autocomplete import (
+    AUTOCOMPLETE_FIELD_LABELS,
+    AutocompleteObservation,
+    AutocompleteSelectionResult,
+    AutocompleteTestStatus,
+)
 from sidjily.sidjilcom.criteria import (
     CriteriaValidationError,
     SearchCriteria,
@@ -120,6 +126,12 @@ class SidjilyApp:
             command=self._diagnose_search_modes,
         )
         self.search_modes_button.pack(side="left", padx=8)
+        self.autocomplete_button = ttk.Button(
+            navigation_buttons,
+            text="Tester une autocomplétion",
+            command=self._test_autocomplete,
+        )
+        self.autocomplete_button.pack(side="left", padx=8)
         self.diagnostic_output = ttk.Label(
             navigation_panel,
             text="Aucun diagnostic. Aucune valeur de champ, cookie ou jeton n'est collecté; aucune recherche n'est lancée.",
@@ -290,6 +302,17 @@ class SidjilyApp:
             "Analyse des modes (aucune recherche ne sera soumise)",
         )
 
+    def _test_autocomplete(self) -> None:
+        if self.session_manager.snapshot.state != SessionState.CONNECTED:
+            messagebox.showinfo(
+                "Session requise",
+                "Connectez-vous puis ouvrez « Trouver une entreprise » avant le test.",
+                parent=self.root,
+            )
+            return
+        dialog = _AutocompleteTestDialog(self.root, self.session_manager)
+        self.root.wait_window(dialog.window)
+
     def _set_diagnostic_report(self, report: str) -> None:
         self._diagnostic_report = report
         self.diagnostic_text.configure(state="normal")
@@ -397,6 +420,7 @@ class SidjilyApp:
         self.enterprise_search_button.configure(state=state)
         self.diagnostics_button.configure(state=state)
         self.search_modes_button.configure(state=state)
+        self.autocomplete_button.configure(state=state)
 
     def _poll_session(self) -> None:
         self._refresh_session_status()
@@ -679,4 +703,286 @@ class _NewSearchDialog:
             messagebox.showwarning("Critères invalides", str(exc), parent=self.window)
             return
         self.result = name, criteria
+        self.window.destroy()
+
+
+class _AutocompleteTestDialog:
+    """Outil manuel en trois temps: observer, choisir explicitement, puis arrêter."""
+
+    def __init__(self, parent: tk.Tk, session_manager: SidjilcomSessionManager):
+        self.session_manager = session_manager
+        self.window = tk.Toplevel(parent)
+        self.window.title("Test contrôlé d'une autocomplétion")
+        self.window.transient(parent)
+        self.window.grab_set()
+        self.window.geometry("940x700")
+        self.window.minsize(780, 560)
+        self.window.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        self._field_by_label = {label: key for key, label in AUTOCOMPLETE_FIELD_LABELS.items()}
+        self.field = tk.StringVar(value="")
+        self.query = tk.StringVar()
+        self._future: Any = None
+        self._operation: str | None = None
+        self._token: str | None = None
+        self._suggestions: tuple[Any, ...] = ()
+        self._selection_done = False
+        self._close_after_reset = False
+
+        frame = ttk.Frame(self.window, padding=14)
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(1, weight=1)
+        frame.rowconfigure(3, weight=1)
+        ttk.Label(frame, text="Tester une autocomplétion", font=("Segoe UI", 15, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        )
+        ttk.Label(
+            frame,
+            text=(
+                "Restez sur la page de recherche. Le champ ciblé doit être vide. "
+                "Le test tape seulement la valeur choisie et observe le composant. "
+                "Après une sélection, il s'arrête: aucun clic sur Rechercher, aucune collecte."
+            ),
+            wraplength=880,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+
+        controls = ttk.Frame(frame)
+        controls.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        ttk.Label(controls, text="Champ").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.field_box = ttk.Combobox(
+            controls,
+            textvariable=self.field,
+            values=tuple(AUTOCOMPLETE_FIELD_LABELS.values()),
+            state="readonly",
+            width=38,
+        )
+        self.field_box.grid(row=0, column=1, sticky="w", padx=(0, 18))
+        ttk.Label(controls, text="Valeur de test").grid(row=0, column=2, sticky="w", padx=(0, 8))
+        self.query_entry = ttk.Entry(controls, textvariable=self.query, width=32)
+        self.query_entry.grid(row=0, column=3, sticky="ew", padx=(0, 10))
+        controls.columnconfigure(3, weight=1)
+        self.test_button = ttk.Button(controls, text="Tester une autocomplétion", command=self._prepare)
+        self.test_button.grid(row=0, column=4, sticky="e")
+
+        result_frame = ttk.LabelFrame(frame, text="Suggestions observées — choisissez-en une pour la sélectionner", padding=8)
+        result_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(0, 10))
+        result_frame.columnconfigure(0, weight=1)
+        result_frame.rowconfigure(0, weight=1)
+        self.suggestion_list = tk.Listbox(result_frame, height=8, exportselection=False)
+        self.suggestion_list.grid(row=0, column=0, sticky="nsew")
+        self.suggestion_list.bind("<<ListboxSelect>>", lambda _event: self._update_buttons())
+        suggestion_scroll = ttk.Scrollbar(result_frame, orient="vertical", command=self.suggestion_list.yview)
+        suggestion_scroll.grid(row=0, column=1, sticky="ns")
+        self.suggestion_list.configure(yscrollcommand=suggestion_scroll.set)
+
+        details_frame = ttk.LabelFrame(frame, text="Observation structurelle (sans valeur de champ ni secret)", padding=8)
+        details_frame.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(0, 8))
+        details_frame.columnconfigure(0, weight=1)
+        self.details = tk.Text(details_frame, height=10, wrap="word", state="disabled", font=("Consolas", 9))
+        self.details.pack(fill="both", expand=True)
+        self.status = ttk.Label(frame, text="Choisissez un champ et une valeur de test.", wraplength=880)
+        self.status.grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=6, column=0, columnspan=2, sticky="e")
+        self.select_button = ttk.Button(
+            buttons, text="Sélectionner la suggestion choisie", command=self._select
+        )
+        self.select_button.pack(side="right", padx=(8, 0))
+        self.reset_button = ttk.Button(
+            buttons, text="Effacer le champ de test", command=self._reset, state="disabled"
+        )
+        self.reset_button.pack(side="right", padx=(8, 0))
+        ttk.Button(buttons, text="Fermer", command=self._on_close).pack(side="right")
+        self._update_buttons()
+
+    def _prepare(self) -> None:
+        field_id = self._field_by_label.get(self.field.get())
+        query = self.query.get()
+        if field_id is None:
+            self.status.configure(text="Choisissez l'un des trois champs autocomplete connus.")
+            return
+        if not query.strip():
+            self.status.configure(text="Saisissez une valeur de test non vide.")
+            return
+        self._run_operation("prepare", self.session_manager.prepare_autocomplete_test(field_id, query))
+
+    def _select(self) -> None:
+        selected = self.suggestion_list.curselection()
+        if not self._token or not selected:
+            return
+        index = int(selected[0])
+        if index >= len(self._suggestions) or not self._suggestions[index].safe_to_select:
+            self.status.configure(text="Cette suggestion n'est pas sûre à cliquer selon sa structure DOM.")
+            return
+        self._run_operation(
+            "select",
+            self.session_manager.select_autocomplete_suggestion(self._token, index),
+        )
+
+    def _reset(self) -> None:
+        if self._token:
+            self._run_operation("reset", self.session_manager.reset_autocomplete_test(self._token))
+
+    def _run_operation(self, operation: str, future: Any) -> None:
+        self._operation = operation
+        self._future = future
+        self.status.configure(text="Test en cours… aucune recherche n'est soumise.")
+        self._update_buttons()
+        self.window.after(100, self._poll_operation)
+
+    def _poll_operation(self) -> None:
+        if self._future is None or not self._future.done():
+            if self._future is not None:
+                self.window.after(100, self._poll_operation)
+            return
+        operation = self._operation
+        future = self._future
+        self._operation = None
+        self._future = None
+        try:
+            result = future.result()
+        except Exception as exc:
+            self.status.configure(text=str(exc))
+            if self._close_after_reset:
+                self._close_after_reset = False
+                if messagebox.askyesno(
+                    "Fermeture sans réinitialisation",
+                    "Le champ n'a pas pu être effacé. Fermer quand même? Vérifiez le champ dans le navigateur avant toute autre action.",
+                    parent=self.window,
+                ):
+                    self.window.destroy()
+                    return
+            self._update_buttons()
+            return
+
+        if operation == "prepare":
+            self._show_observation(result)
+        elif operation == "select":
+            self._show_selection(result)
+        elif operation == "reset":
+            self._token = None
+            self._suggestions = ()
+            self._selection_done = False
+            self._fill_suggestions(())
+            self.status.configure(text="Champ de test réinitialisé à vide. Aucun bouton de recherche n'a été activé.")
+            if self._close_after_reset:
+                self.window.destroy()
+                return
+        self._update_buttons()
+
+    def _show_observation(self, observation: AutocompleteObservation) -> None:
+        self._token = observation.token
+        self._suggestions = observation.suggestions
+        self._selection_done = False
+        self._fill_suggestions(observation.suggestions)
+        self._set_details(self._format_observation(observation))
+        if observation.status is AutocompleteTestStatus.SUGGESTIONS:
+            self.status.configure(
+                text=f"{len(observation.suggestions)} suggestion(s) observée(s). Sélectionnez-en une, puis le test s'arrêtera."
+            )
+        elif observation.status is AutocompleteTestStatus.NO_SUGGESTIONS:
+            self.status.configure(text="Le conteneur de suggestions est apparu sans option visible.")
+        else:
+            self.status.configure(
+                text="Délai dépassé sans liste visible; valeur inexistante ou suggestion plus lente que le délai. Champ effacé."
+            )
+
+    def _show_selection(self, result: AutocompleteSelectionResult) -> None:
+        self._selection_done = True
+        state = "acceptée" if result.accepted else "non confirmée par le composant"
+        self.status.configure(
+            text=f"STOP — suggestion {state}. Aucune autre action n'est lancée; effacez le champ pour annuler le test."
+        )
+        detail = [
+            f"Suggestion choisie : {result.suggestion_text}",
+            f"Sélection acceptée : {'oui' if result.accepted else 'non'}",
+            f"Valeur du champ égale au texte choisi : {'oui' if result.input_matches_suggestion else 'non'}",
+            f"Liste de suggestions disparue : {'oui' if result.suggestions_disappeared else 'non'}",
+            "Aucun clic sur Rechercher; aucune requête de recherche ni collecte de résultats.",
+        ]
+        if result.nearby_controls_before or result.nearby_controls_after:
+            detail.append("Contrôles voisins avant sélection :")
+            detail.extend(f"  {item}" for item in result.nearby_controls_before)
+            detail.append("Contrôles voisins après sélection :")
+            detail.extend(f"  {item}" for item in result.nearby_controls_after)
+            detail.append("Une différence structurelle peut indiquer une mise à jour dépendante; aucune valeur de ces contrôles n'est lue.")
+        self._set_details("\n".join(detail))
+
+    @staticmethod
+    def _format_observation(observation: AutocompleteObservation) -> str:
+        control = observation.control
+        lines = [
+            f"Mapping : {control.label} · suffixe {control.suffix}",
+            f"Contrôle : <{control.tag_name}> · id={control.element_id or 'absent'} · classes={', '.join(control.class_names) or 'aucune'}",
+            f"ARIA : role={control.role or 'absent'} · autocomplete={control.aria_autocomplete or 'absent'} · haspopup={control.aria_haspopup or 'absent'} · controls={control.aria_controls or 'absent'} · owns={control.aria_owns or 'absent'} · active={control.aria_activedescendant or 'absent'} · expanded={control.aria_expanded or 'absent'}",
+            f"Attribut autocomplete={control.autocomplete_attribute or 'absent'} · frame={control.frame_label} · window.YUI disponible={'oui' if control.yui_global_available else 'non'} (cela ne confirme pas à lui seul l'attachement du composant)",
+            "Saisie de test : frappes clavier séquentielles Playwright; pas d'endpoint direct. Les écouteurs privés du composant ne sont pas introspectés.",
+            f"Conteneur(s) visible(s) : {len(observation.containers)}",
+        ]
+        for index, container in enumerate(observation.containers, 1):
+            lines.append(
+                f"  {index}. <{container.tag_name}> id={container.element_id or 'absent'} "
+                f"classes={','.join(container.class_names) or 'aucune'} role={container.role or 'absent'} "
+                f"aria-expanded={container.aria_expanded or 'absent'} "
+                f"visible={'oui' if container.visible else 'non'} relation={container.relation}"
+            )
+        lines.append(f"Suggestions visibles : {len(observation.suggestions)}")
+        for suggestion in observation.suggestions:
+            lines.append(
+                f"  {suggestion.index + 1}. <{suggestion.tag_name}> role={suggestion.role or 'absent'} "
+                f"classes={','.join(suggestion.class_names) or 'aucune'} "
+                f"aria-selected={suggestion.aria_selected or 'absent'} "
+                f"data-attrs={','.join(suggestion.data_attribute_names) or 'aucun'} "
+                f"sélectionnable={'oui' if suggestion.safe_to_select else 'non'}"
+            )
+        if observation.nearby_controls:
+            lines.append("Contrôles voisins (structure/attributs, jamais leur valeur) :")
+            lines.extend(f"  {item}" for item in observation.nearby_controls)
+        lines.append("Après sélection, le test s'arrête. La fermeture/réinitialisation est une action explicite distincte.")
+        return "\n".join(lines)
+
+    def _fill_suggestions(self, suggestions: tuple[Any, ...]) -> None:
+        self.suggestion_list.delete(0, "end")
+        for suggestion in suggestions:
+            suffix = "" if suggestion.safe_to_select else " [observation seule — non cliquable]"
+            self.suggestion_list.insert("end", f"{suggestion.text}{suffix}")
+
+    def _set_details(self, text: str) -> None:
+        self.details.configure(state="normal")
+        self.details.delete("1.0", "end")
+        self.details.insert("1.0", text)
+        self.details.configure(state="disabled")
+
+    def _update_buttons(self) -> None:
+        busy = self._future is not None
+        selected = self.suggestion_list.curselection()
+        selection_safe = bool(
+            selected
+            and int(selected[0]) < len(self._suggestions)
+            and self._suggestions[int(selected[0])].safe_to_select
+        )
+        self.test_button.configure(state="disabled" if busy or self._token else "normal")
+        self.field_box.configure(state="disabled" if busy or self._token else "readonly")
+        self.query_entry.configure(state="disabled" if busy or self._token else "normal")
+        self.select_button.configure(
+            state="normal" if not busy and self._token and selection_safe and not self._selection_done else "disabled"
+        )
+        self.reset_button.configure(state="normal" if not busy and self._token else "disabled")
+
+    def _on_close(self) -> None:
+        if self._future is not None:
+            self.status.configure(text="Attendez la fin de l'opération en cours; aucun bouton de recherche ne sera activé.")
+            return
+        if self._token:
+            if not messagebox.askyesno(
+                "Réinitialiser le test",
+                "Une valeur temporaire est encore dans le champ. L'effacer avant de fermer ?",
+                parent=self.window,
+            ):
+                return
+            self._close_after_reset = True
+            self._reset()
+            return
         self.window.destroy()

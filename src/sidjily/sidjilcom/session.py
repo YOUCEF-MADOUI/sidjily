@@ -8,8 +8,14 @@ import threading
 from concurrent.futures import Future
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable
+from typing import Any, Callable
 
+from sidjily.sidjilcom.autocomplete import (
+    AutocompleteObservation,
+    AutocompleteResetResult,
+    AutocompleteSelectionResult,
+    AutocompleteTestError,
+)
 from sidjily.sidjilcom.browser import (
     BrowserAdapter,
     PageDiagnostics,
@@ -74,7 +80,8 @@ class NavigationFailed(SessionOperationError):
 @dataclass(slots=True)
 class _SessionCommand:
     name: str
-    future: Future[SessionDiagnostics]
+    future: Future[Any]
+    arguments: tuple[Any, ...] = ()
 
 
 def classify_session(evidence: PageEvidence, *, previously_connected: bool) -> SessionState:
@@ -190,15 +197,31 @@ class SidjilcomSessionManager:
         """Analyser les deux formulaires sans saisir ni soumettre de critères."""
         return self._submit_operation("search_modes")
 
-    def _submit_operation(self, name: str) -> Future[SessionDiagnostics]:
-        future: Future[SessionDiagnostics] = Future()
+    def prepare_autocomplete_test(self, field_id: str, query: str) -> Future[AutocompleteObservation]:
+        """Taper une valeur de test et inspecter les suggestions; aucune recherche n'est lancée."""
+        return self._submit_operation("autocomplete_prepare", field_id, query, require_connected=True)
+
+    def select_autocomplete_suggestion(
+        self, token: str, suggestion_index: int
+    ) -> Future[AutocompleteSelectionResult]:
+        """Sélectionner une option observée puis s'arrêter sans soumettre le formulaire."""
+        return self._submit_operation("autocomplete_select", token, suggestion_index, require_connected=True)
+
+    def reset_autocomplete_test(self, token: str) -> Future[AutocompleteResetResult]:
+        """Effacer explicitement la valeur temporaire du champ de test."""
+        return self._submit_operation("autocomplete_reset", token, require_connected=True)
+
+    def _submit_operation(self, name: str, *arguments: Any, require_connected: bool = False) -> Future[Any]:
+        future: Future[Any] = Future()
         with self._lock:
             if self._thread is None or not self._thread.is_alive():
                 future.set_exception(SessionOperationError("Ouvrez d'abord Sidjilcom dans le navigateur SIDJILY."))
             elif self._snapshot.state in (SessionState.DISCONNECTING, SessionState.ERROR):
                 future.set_exception(SessionOperationError("Le navigateur Sidjilcom n'est pas disponible."))
+            elif require_connected and self._snapshot.state != SessionState.CONNECTED:
+                future.set_exception(SessionNotConnected())
             else:
-                self._commands.put(_SessionCommand(name, future))
+                self._commands.put(_SessionCommand(name, future, tuple(arguments)))
         return future
 
     def disconnect(self) -> None:
@@ -277,6 +300,21 @@ class SidjilcomSessionManager:
 
     def _execute_command(self, browser: BrowserAdapter, command: _SessionCommand) -> None:
         try:
+            if command.name.startswith("autocomplete_"):
+                if self.snapshot.state != SessionState.CONNECTED:
+                    raise SessionNotConnected()
+                if command.name == "autocomplete_prepare":
+                    result = browser.prepare_autocomplete_test(self.config, *command.arguments)
+                elif command.name == "autocomplete_select":
+                    result = browser.select_autocomplete_suggestion(self.config, *command.arguments)
+                elif command.name == "autocomplete_reset":
+                    result = browser.reset_autocomplete_test(self.config, *command.arguments)
+                else:
+                    raise SessionOperationError("Commande autocomplete inconnue.")
+                if not command.future.done():
+                    command.future.set_result(result)
+                return
+
             if command.name == "home":
                 browser.go_home(self.config)
             elif command.name == "dashboard":
@@ -351,6 +389,9 @@ class SidjilcomSessionManager:
         except SessionOperationError as exc:
             if not command.future.done():
                 command.future.set_exception(exc)
+        except AutocompleteTestError as exc:
+            if not command.future.done():
+                command.future.set_exception(SessionOperationError(str(exc)))
         except SearchModeAnalysisError as exc:
             if not command.future.done():
                 command.future.set_exception(SessionOperationError(str(exc)))

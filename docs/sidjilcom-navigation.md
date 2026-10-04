@@ -22,7 +22,15 @@ Suffixes communs connus : `wilcom` (Commune/Wilaya d'inscription), `secteu` (Sec
 
 Les autocomplétions `wilcom`, `activi` et `nation` sont rapportées comme des inputs de classe `yui3-aclist-input` avec `aria-autocomplete="list"`. Les valeurs et nombres d'options des listes ne sont pas transmis; ces contrôles restent désactivés dans l'interface et aucune option n'est inventée, y compris pour `nrc2` et `nrc5`. Les cinq composants `nrc1`…`nrc5` sont modélisés séparément, sans signification supposée; cette signification doit être confirmée avant toute saisie automatique.
 
-L'interface permet de sélectionner le mode, de remplir des critères locaux facultatifs et de produire un aperçu. L'autocomplétion n'est pas interrogée. L'aperçu et l'enregistrement du brouillon n'envoient aucune requête Sidjilcom et ne cliquent pas sur **Rechercher**.
+L'interface permet de sélectionner le mode, de remplir des critères locaux facultatifs et de produire un aperçu. L'aperçu et l'enregistrement du brouillon n'envoient aucune requête Sidjilcom et ne cliquent pas sur **Rechercher**.
+
+## Test contrôlé des autocomplétions (Tâche 11)
+
+Le bouton **Tester une autocomplétion** exige une session confirmée et la page « Trouver une entreprise ». L'utilisateur choisit Activité (`activi`), Commune/Wilaya (`wilcom`) ou Nationalité (`nation`) et saisit lui-même un texte de test. Le contrôle correspondant doit d'abord être vide; sinon, le test refuse de modifier le critère existant. Le programme tape caractère par caractère via le navigateur visible, observe le DOM rendu et affiche seulement les conteneurs/options associés (classes, rôles, attributs ARIA et texte visible). Il n'appelle aucun endpoint directement et n'écrit pas le texte testé dans les logs.
+
+La sélection est une action séparée, limitée à une suggestion visible identifiée par le DOM observé et excluant les liens et boutons. Après cette sélection, l'opération s'arrête et vérifie localement le texte du champ ainsi que l'apparition/disparition de la liste. Le champ de test reste sélectionné jusqu'à **Effacer le champ de test**, action explicite qui le remet à vide. Pour `wilcom`, les contrôles voisins sont comparés structurellement avant/après, sans lire leurs valeurs ni les options d'autres listes. Les tests automatisés de cette abstraction utilisent uniquement un pilote simulé.
+
+Aucun accès à une session Sidjilcom réelle n'a été effectué par l'agent dans cette tâche; la mécanique réelle d'Activité, de Wilaya/Commune et de Nationalité doit encore être confirmée en lançant manuellement ce test sur le portail. Aucune recherche réelle n'a été lancée.
 
 ## Validation manuelle avec le compte de l'utilisateur
 

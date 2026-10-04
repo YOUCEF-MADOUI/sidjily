@@ -9,6 +9,14 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urljoin, urlsplit
 
+from sidjily.sidjilcom.autocomplete import (
+    AutocompleteObservation,
+    AutocompleteResetResult,
+    AutocompleteSelectionResult,
+    AutocompleteTestError,
+    AutocompleteTester,
+)
+from sidjily.sidjilcom.autocomplete_playwright import PlaywrightAutocompleteDriver
 from sidjily.sidjilcom.config import SessionConfig
 from sidjily.sidjilcom.diagnostics import (
     FormDiagnosticBundle,
@@ -578,6 +586,14 @@ class BrowserAdapter(Protocol):
 
     def diagnose_search_modes(self, config: SessionConfig) -> PageDiagnostics: ...
 
+    def prepare_autocomplete_test(self, config: SessionConfig, field_id: str, query: str) -> AutocompleteObservation: ...
+
+    def select_autocomplete_suggestion(
+        self, config: SessionConfig, token: str, suggestion_index: int
+    ) -> AutocompleteSelectionResult: ...
+
+    def reset_autocomplete_test(self, config: SessionConfig, token: str) -> AutocompleteResetResult: ...
+
     def close(self) -> None: ...
 
 
@@ -588,6 +604,7 @@ class PlaywrightBrowser:
         self._playwright = None
         self._context = None
         self._page = None
+        self._autocomplete_tester: AutocompleteTester | None = None
 
     def open(self, config: SessionConfig) -> None:
         # Import paresseux : les tests mockés et les fonctions hors session ne lancent pas Chromium.
@@ -611,6 +628,9 @@ class PlaywrightBrowser:
         pages = self._context.pages
         self._page = pages[0] if pages else self._context.new_page()
         self._page.goto(config.url, wait_until="domcontentloaded", timeout=config.navigation_timeout_ms)
+        self._autocomplete_tester = AutocompleteTester(
+            PlaywrightAutocompleteDriver(self._page, config.url)
+        )
 
     def probe_authenticated_route(self, config: SessionConfig) -> None:
         """Vérifie l'accès réel en ouvrant la page protégée, sans cliquer ni soumettre."""
@@ -1103,6 +1123,34 @@ class PlaywrightBrowser:
         )
         return replace(legal, visible_fields=visible_fields, report=report)
 
+    def prepare_autocomplete_test(
+        self, config: SessionConfig, field_id: str, query: str
+    ) -> AutocompleteObservation:
+        tester = self._require_autocomplete_tester(config)
+        return tester.prepare(field_id, query)
+
+    def select_autocomplete_suggestion(
+        self, config: SessionConfig, token: str, suggestion_index: int
+    ) -> AutocompleteSelectionResult:
+        tester = self._require_autocomplete_tester(config)
+        return tester.select(token, suggestion_index)
+
+    def reset_autocomplete_test(self, config: SessionConfig, token: str) -> AutocompleteResetResult:
+        tester = self._require_autocomplete_tester(config)
+        return tester.reset(token)
+
+    def _require_autocomplete_tester(self, config: SessionConfig) -> AutocompleteTester:
+        if self._page is None or self._page.is_closed() or self._autocomplete_tester is None:
+            raise AutocompleteTestError("Navigateur Sidjilcom indisponible.")
+        if (
+            not is_portal_host(self._page.url, config.url)
+            or identify_section(self._page.url) != "Trouver une entreprise"
+        ):
+            raise AutocompleteTestError(
+                "Ouvrez la page Trouver une entreprise avant de tester une autocomplétion."
+            )
+        return self._autocomplete_tester
+
     def close(self) -> None:
         try:
             if self._context is not None:
@@ -1110,6 +1158,7 @@ class PlaywrightBrowser:
         finally:
             self._context = None
             self._page = None
+            self._autocomplete_tester = None
             if self._playwright is not None:
                 self._playwright.stop()
             self._playwright = None
