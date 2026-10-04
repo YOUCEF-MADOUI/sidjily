@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="fr">
+<body>
+  <!-- Fixture synthétique : ne décrit pas les champs réels du portail. -->
+  <div id="dz_cnrc_sidjilcom_recherchedetaillee_portlet_RechercheDetailleePortlet">
+    <form id="physical-search" aria-label="Recherche personnes physiques" method="POST"
+          action="/fr/search/physical?access_token=FIXTURE-TOKEN">
+      <fieldset>
+        <legend>Identification de la personne physique</legend>
+        <label for="physical-registration">Numéro d'inscription</label>
+        <input id="physical-registration" name="registration_number" type="text" required
+               class="form-control registration-number" placeholder="Numéro d'inscription"
+               value="VALEUR PERSONNELLE FIXTURE 99887766">
+        <label for="physical-first-name">Prénom</label>
+        <input id="physical-first-name" name="first_name" type="text" value="NOM PERSONNEL FIXTURE">
+        <label for="physical-wilaya">Wilaya</label>
+        <select id="physical-wilaya" name="wilaya" class="select2-hidden-accessible" required
+                aria-hidden="true" data-select2-id="fixture-wilaya"
+                data-ajax--url="/fr/api/wilayas?token=WILAYA-TOKEN"
+                data-ajax--method="GET">
+          <option value="01">Sétif</option><option value="16">Alger</option>
+        </select>
+        <span role="combobox" aria-label="Wilaya" aria-autocomplete="list"
+              class="select2-selection select2-selection--single">Choisir une wilaya</span>
+        <label for="physical-commune">Commune</label>
+        <input id="physical-commune" name="commune" type="text" role="combobox"
+               aria-label="Commune" aria-autocomplete="list" aria-required="true" class="commune-autocomplete"
+               data-endpoint="/fr/api/communes?token=COMMUNE-TOKEN" data-value="PRIVATE QUERY">
+        <label for="physical-activity">Activité</label>
+        <select id="physical-activity" name="activity" required>
+          <option value="a1">Commerce de détail</option><option value="a2">Services</option>
+        </select>
+        <label for="physical-date-from">Date début</label>
+        <input id="physical-date-from" name="date_from" type="date" value="2020-01-01">
+        <label for="physical-status">Etat commerçant</label>
+        <input id="physical-status" name="merchant_status" type="checkbox" checked value="PRIVATE">
+        <button id="physical-search-button" type="submit" name="search" onclick="submitSearch('PRIVATE')">Rechercher</button>
+        <button id="physical-reset-button" type="reset" onclick="clearSearch()">Réinitialiser</button>
+      </fieldset>
+    </form>
+    <input type="password" name="password" value="PASSWORD-FIXTURE-SECRET">
+    <input type="hidden" name="csrf_token" value="CSRF-FIXTURE-SECRET">
+  </div>
+</body>
+</html>

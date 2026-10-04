@@ -86,7 +86,7 @@ class SidjilyApp:
         )
         self.disconnect_button.pack(side="left")
 
-        navigation_panel = ttk.LabelFrame(container, text="Validation de navigation (sans recherche)", padding=8)
+        navigation_panel = ttk.LabelFrame(container, text="Navigation et diagnostic (sans recherche)", padding=8)
         navigation_panel.pack(fill="x", pady=(0, 12))
         navigation_buttons = ttk.Frame(navigation_panel)
         navigation_buttons.pack(fill="x")
@@ -106,6 +106,12 @@ class SidjilyApp:
             navigation_buttons, text="Diagnostiquer la page", command=self._diagnose_page
         )
         self.diagnostics_button.pack(side="left")
+        self.search_modes_button = ttk.Button(
+            navigation_buttons,
+            text="Analyser personnes physiques / morales",
+            command=self._diagnose_search_modes,
+        )
+        self.search_modes_button.pack(side="left", padx=8)
         self.diagnostic_output = ttk.Label(
             navigation_panel,
             text="Aucun diagnostic. Aucune valeur de champ, cookie ou jeton n'est collecté; aucune recherche n'est lancée.",
@@ -268,6 +274,12 @@ class SidjilyApp:
     def _diagnose_page(self) -> None:
         self._request_session_operation(self.session_manager.diagnose_page(), "Diagnostic de la page")
 
+    def _diagnose_search_modes(self) -> None:
+        self._request_session_operation(
+            self.session_manager.diagnose_search_modes(),
+            "Analyse des modes (aucune recherche ne sera soumise)",
+        )
+
     def _set_diagnostic_report(self, report: str) -> None:
         self._diagnostic_report = report
         self.diagnostic_text.configure(state="normal")
@@ -367,6 +379,7 @@ class SidjilyApp:
         self.dashboard_button.configure(state=state)
         self.enterprise_search_button.configure(state=state)
         self.diagnostics_button.configure(state=state)
+        self.search_modes_button.configure(state=state)
 
     def _poll_session(self) -> None:
         self._refresh_session_status()

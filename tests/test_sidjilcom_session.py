@@ -47,6 +47,7 @@ class FakeBrowser:
         self.home_calls = 0
         self.search_calls = 0
         self.dashboard_calls = 0
+        self.search_mode_calls = 0
         self.navigation_evidence = PageEvidence(True, False, False, False, True)
         self.dashboard_evidence = PageEvidence(True, False, False, False, False, True)
         self.page_diagnostics = PageDiagnostics(
@@ -87,6 +88,10 @@ class FakeBrowser:
         )
 
     def diagnostics(self, _config: SessionConfig) -> PageDiagnostics:
+        return self.page_diagnostics
+
+    def diagnose_search_modes(self, _config: SessionConfig) -> PageDiagnostics:
+        self.search_mode_calls += 1
         return self.page_diagnostics
 
     def close(self) -> None:
@@ -317,6 +322,27 @@ class SessionManagerTests(unittest.TestCase):
             self.assertEqual(report.page.section, "Trouver une entreprise")
             self.assertIn("Raison Sociale", report.page.visible_fields[0])
             self.assertTrue(manager.config.connected_marker_path.is_file())
+
+    def test_search_mode_analysis_requires_authenticated_search_page_and_never_submits(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser = FakeBrowser()
+            browser.evidence = browser.navigation_evidence
+            manager = self.make_manager(browser, temp_dir)
+            manager.connect()
+            self.assertTrue(browser.opened.wait(1))
+            result = manager.diagnose_search_modes().result(timeout=1)
+            self.assertEqual(browser.search_mode_calls, 1)
+            self.assertEqual(result.state, SessionState.CONNECTED)
+            self.assertEqual(result.page.section, "Trouver une entreprise")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser = FakeBrowser(PageEvidence(True, True, False, False))
+            manager = self.make_manager(browser, temp_dir)
+            manager.connect()
+            self.assertTrue(browser.opened.wait(1))
+            with self.assertRaises(SessionNotConnected):
+                manager.diagnose_search_modes().result(timeout=1)
+            self.assertEqual(browser.search_mode_calls, 0)
 
     def test_unauthenticated_redirect_is_reported_to_the_caller(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

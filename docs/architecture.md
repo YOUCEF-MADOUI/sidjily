@@ -30,7 +30,7 @@ tests/
 5. Un indicateur de connexion positive est requis avant d'annoncer « Connecté ». Les indices DOM sont centralisés dans `sidjilcom/selectors.py` afin de les adapter si le portail évolue.
 6. Après une connexion confirmée, un marqueur local vide est créé dans le profil. Il indique uniquement qu'une session avait déjà été établie et permet de distinguer une demande de reconnexion après redémarrage. Le marqueur seul ne confirme jamais une session active.
 7. Les commandes Accueil, Tableau de bord et Trouver une entreprise passent par une file de commandes du thread Playwright. Le tableau de bord/la page métier ne confirment l'accès qu'après vérification du contenu réel; une redirection vers login est rapportée.
-8. Le diagnostic ne retourne que l'URL sans query/fragment, le titre, une section reconnue, les liens Sidjilcom connus et les libellés/types des champs visibles. Il ne lit aucune valeur et ne déclenche aucune recherche.
+8. Le diagnostic retourne des métadonnées DOM assainies des formulaires et contrôles visibles (jamais leurs valeurs), y compris contraintes, association au formulaire, composants et endpoints déclarés. L'analyse des modes sélectionne uniquement les liens PERSONNES PHYSIQUES/MORALES, attend la stabilisation du portlet et compare les instantanés sans activer les boutons métier ni appeler directement les endpoints.
 9. La fermeture ferme Chromium et conserve le profil local. Une session expirée ne modifie pas SQLite ni les recherches existantes.
 
 États affichés : `DISCONNECTED`, `CONNECTING`, `WAITING_FOR_LOGIN`, `CONNECTED`, `SESSION_EXPIRED`, `ERROR`; `DISCONNECTING` est un état transitoire de fermeture.

@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import inspect
+import re
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from sidjily.sidjilcom.browser import PlaywrightBrowser
+from sidjily.sidjilcom.browser import PlaywrightBrowser, SearchModeAnalysisError
 from sidjily.sidjilcom.config import DEFAULT_SIDJILCOM_URL, SessionConfig
-from sidjily.sidjilcom.diagnostics import diagnostics_from_html_fixture, format_diagnostic
+from sidjily.sidjilcom.selectors import DEFAULT_ENTERPRISE_SEARCH_ROUTE
+from sidjily.sidjilcom.diagnostics import (
+    diagnostics_from_html_fixture,
+    format_diagnostic,
+    format_search_mode_comparison,
+)
 
 
 FORM_FIXTURE = """
@@ -86,6 +92,15 @@ class DiagnosticFixtureTests(unittest.TestCase):
         self.assertEqual(field.options, ())
         self.assertTrue(field.options_redacted)
         self.assertNotIn("personne@example.org", str(bundle))
+
+        mixed = diagnostics_from_html_fixture(
+            '<form><label for="region-ref">Wilaya et numéro de dossier</label>'
+            '<select id="region-ref" name="region_ref"><option>Région privée</option></select></form>'
+        )
+        mixed_field = mixed.forms[0].fields[0]
+        self.assertEqual(mixed_field.options, ())
+        self.assertTrue(mixed_field.options_redacted)
+        self.assertNotIn("Région privée", str(mixed))
 
 
 class _EmptyLinks:
@@ -207,8 +222,14 @@ class BrowserDiagnosticMockTests(unittest.TestCase):
         self.assertNotIn("element.value", script)
         self.assertNotIn("getAttribute('value')", script)
         self.assertIn("getAttribute('type')", script)
+        self.assertIn("required: !!element.required", script)
+        self.assertIn("form_action: form.action", script)
+        self.assertIn("form.getAttribute('method')", script)
+        self.assertIn("onclick_present", script)
         self.assertIn("mayReadOptionText(label)", script)
         self.assertIn("[role=", script)
+        self.assertNotIn("fetch(", script)
+        self.assertNotIn("XMLHttpRequest", script)
         self.assertNotIn("document.cookie", script)
         self.assertNotIn("localStorage", script)
         diagnostic_source = inspect.getsource(PlaywrightBrowser.diagnostics)
@@ -216,6 +237,149 @@ class BrowserDiagnosticMockTests(unittest.TestCase):
         self.assertNotIn(".fill(", diagnostic_source)
         self.assertNotIn(".press(", diagnostic_source)
         self.assertNotIn("submit()", diagnostic_source)
+
+
+class _ModeCandidates:
+    def __init__(self, frame: "_ModeFrame", pattern: object):
+        self.frame = frame
+        self.pattern = pattern
+        self.label = next(
+            (label for label in frame.mode_links if pattern.search(label)),
+            "",
+        )
+
+    def count(self) -> int:
+        return 1 if self.label else 0
+
+    def nth(self, index: int) -> "_ModeCandidates":
+        if index != 0 or not self.label:
+            raise IndexError(index)
+        return self
+
+    def get_attribute(self, name: str) -> str | None:
+        return self.frame.mode_link_href if name == "href" else None
+
+    def evaluate(self, _script: str) -> str:
+        return "a"
+
+    def click(self, *, timeout: int) -> None:
+        self.frame.clicks.append(self.label)
+        self.frame.mode = self.label
+
+
+class _ModeFrame:
+    name = ""
+    url = f"https://sidjilcom.cnrc.dz{DEFAULT_ENTERPRISE_SEARCH_ROUTE}"
+    mode_link_href = "/fr/group/sidjilcom/repertoire-des-commercants"
+
+    def __init__(self) -> None:
+        self.clicks: list[str] = []
+        self.stability_waits = 0
+        self.portlet_only_flags: list[bool] = []
+        self.mode = ""
+        self.hide_legal_after_physical = False
+        self.snapshots = {
+            "PERSONNES PHYSIQUES": {
+                "scope_found": True,
+                "forms": [{"form_id": "physical", "form_title": "Recherche physique", "method": "POST"}],
+                "fields": [{"label": "Numéro d'inscription", "name": "registration_number", "id": "physical-id",
+                            "html_type": "text", "required": True, "form_id": "physical",
+                            "form_title": "Recherche physique"}],
+                "buttons": [{"text": "Rechercher", "tag_name": "button", "html_type": "submit"}],
+                "clickables": [],
+            },
+            "PERSONNES MORALES": {
+                "scope_found": True,
+                "forms": [{"form_id": "legal", "form_title": "Recherche morale", "method": "GET"}],
+                "fields": [{"label": "Raison sociale", "name": "company_name", "id": "legal-id",
+                            "html_type": "text", "required": True, "form_id": "legal",
+                            "form_title": "Recherche morale"}],
+                "buttons": [{"text": "Rechercher", "tag_name": "button", "html_type": "submit"}],
+                "clickables": [],
+            },
+        }
+
+    @property
+    def mode_links(self) -> tuple[str, ...]:
+        if self.hide_legal_after_physical and self.mode == "PERSONNES PHYSIQUES":
+            return ("PERSONNES PHYSIQUES",)
+        return ("PERSONNES PHYSIQUES", "PERSONNES MORALES")
+
+    def get_by_role(self, role: str, *, name: object) -> _ModeCandidates:
+        return _ModeCandidates(self, name) if role == "link" else _ModeCandidates(self, re.compile("$^"))
+
+    def evaluate(self, script: str, *args: object) -> object:
+        if "MutationObserver" in script:
+            self.stability_waits += 1
+            return True
+        if args and isinstance(args[0], dict):
+            self.portlet_only_flags.append(args[0].get("portletOnly") is True)
+        return self.snapshots[self.mode]
+
+
+class SearchModeAnalysisTests(unittest.TestCase):
+    def test_only_exact_mode_links_are_clicked_once_and_snapshots_are_compared(self) -> None:
+        frame = _ModeFrame()
+        page = Mock()
+        page.url = frame.url
+        page.title.return_value = "Trouver une entreprise"
+        page.frames = [frame]
+        page.get_by_role.return_value = _EmptyLinks()
+        browser = PlaywrightBrowser()
+        browser._page = page
+
+        result = browser.diagnose_search_modes(SessionConfig(url=DEFAULT_SIDJILCOM_URL))
+
+        self.assertEqual(frame.clicks, ["PERSONNES PHYSIQUES", "PERSONNES MORALES"])
+        self.assertEqual(frame.stability_waits, 2)
+        self.assertEqual(frame.portlet_only_flags, [True, True])
+        self.assertIn("===== PERSONNES PHYSIQUES =====", result.report)
+        self.assertIn("===== PERSONNES MORALES =====", result.report)
+        self.assertIn("Spécifiques physiques : registration_number", result.report)
+        self.assertIn("Spécifiques morales : company_name", result.report)
+        self.assertIn("aucun bouton de recherche activé", result.report)
+        self.assertNotIn(".click(", inspect.getsource(PlaywrightBrowser.diagnostics))
+
+    def test_second_mode_reloads_initial_route_if_first_selection_hides_its_link(self) -> None:
+        frame = _ModeFrame()
+        frame.hide_legal_after_physical = True
+        page = Mock()
+        page.url = frame.url
+        page.title.return_value = "Trouver une entreprise"
+        page.frames = [frame]
+        page.main_frame = frame
+        page.get_by_role.return_value = _EmptyLinks()
+        page.goto.side_effect = lambda *_args, **_kwargs: setattr(frame, "mode", "")
+        browser = PlaywrightBrowser()
+        browser._page = page
+
+        result = browser.diagnose_search_modes(SessionConfig(url=DEFAULT_SIDJILCOM_URL))
+
+        self.assertEqual(frame.clicks, ["PERSONNES PHYSIQUES", "PERSONNES MORALES"])
+        self.assertEqual(page.goto.call_count, 1)
+        self.assertIn("===== PERSONNES MORALES =====", result.report)
+
+    def test_mode_analyzer_refuses_untrusted_or_parameterized_mode_links(self) -> None:
+        invalid_hrefs = (
+            "https://example.org/collect?token=DO-NOT-LEAK",
+            "https://sidjilcom.cnrc.dz/fr/group/sidjilcom/repertoire-des-commercants?token=DO-NOT-LEAK",
+            "https://user:secret@sidjilcom.cnrc.dz/fr/group/sidjilcom/repertoire-des-commercants",
+        )
+        for href in invalid_hrefs:
+            with self.subTest(href=href):
+                frame = _ModeFrame()
+                frame.mode_link_href = href
+                page = Mock()
+                page.url = frame.url
+                page.title.return_value = "Trouver une entreprise"
+                page.frames = [frame]
+                page.get_by_role.return_value = _EmptyLinks()
+                browser = PlaywrightBrowser()
+                browser._page = page
+
+                with self.assertRaises(SearchModeAnalysisError):
+                    browser.diagnose_search_modes(SessionConfig(url=DEFAULT_SIDJILCOM_URL))
+                self.assertEqual(frame.clicks, [])
 
 
 class _MockFrame:
@@ -312,6 +476,76 @@ class DiagnosticDOMFixtureTests(unittest.TestCase):
         ):
             self.assertNotIn(secret, report)
         self.assertNotIn("access_token=", report)
+
+    def test_persons_modes_compare_form_metadata_without_values_or_secrets(self) -> None:
+        fixture_dir = Path(__file__).parent / "fixtures"
+        physical = diagnostics_from_html_fixture(
+            (fixture_dir / "sidjilcom_personnes_physiques.html").read_text(encoding="utf-8")
+        )
+        legal = diagnostics_from_html_fixture(
+            (fixture_dir / "sidjilcom_personnes_morales.html").read_text(encoding="utf-8")
+        )
+        physical_fields = {field.element_id: field for field in physical.all_controls}
+        legal_fields = {field.element_id: field for field in legal.all_controls}
+
+        self.assertTrue(physical_fields["physical-registration"].required)
+        self.assertEqual(physical_fields["physical-registration"].name, "registration_number")
+        self.assertEqual(physical_fields["physical-wilaya"].component_type, "Select2")
+        self.assertFalse(physical_fields["physical-wilaya"].visible)
+        self.assertTrue(
+            any(field.role == "combobox" and field.label == "Wilaya" and field.visible for field in physical.all_controls)
+        )
+        self.assertEqual(
+            physical_fields["physical-wilaya"].ajax_endpoint,
+            "https://sidjilcom.cnrc.dz/fr/api/wilayas",
+        )
+        self.assertEqual(physical_fields["physical-wilaya"].ajax_method, "GET")
+        self.assertIn("Commerce de détail", physical_fields["physical-activity"].options)
+        self.assertEqual(physical_fields["physical-commune"].component_type, "autocomplete / liste dynamique")
+        self.assertTrue(physical_fields["physical-commune"].required)
+        self.assertNotIn(("data-value", "PRIVATE QUERY"), physical_fields["physical-commune"].data_attributes)
+        self.assertEqual(physical.forms[0].method, "POST")
+        self.assertEqual(physical.forms[0].action, "https://sidjilcom.cnrc.dz/fr/search/physical")
+        self.assertEqual(legal.forms[0].method, "GET")
+        self.assertEqual(legal.forms[0].action, "https://sidjilcom.cnrc.dz/fr/search/legal")
+        self.assertEqual(legal_fields["legal-form"].options, ("SPA", "SARL"))
+        self.assertEqual(legal_fields["legal-status"].options, ("Actif", "Radié"))
+        self.assertEqual(legal_fields["legal-date-to"].component_type, "composant JavaScript date / période")
+
+        physical_buttons = {button.element_id: button for button in physical.buttons}
+        legal_buttons = {button.element_id: button for button in legal.buttons}
+        self.assertEqual(physical_buttons["physical-search-button"].form_id, "physical-search")
+        self.assertEqual(
+            physical_buttons["physical-search-button"].form_action,
+            "https://sidjilcom.cnrc.dz/fr/search/physical",
+        )
+        self.assertEqual(physical_buttons["physical-search-button"].form_method, "POST")
+        self.assertTrue(physical_buttons["physical-search-button"].onclick_present)
+        self.assertEqual(physical_buttons["physical-search-button"].onclick_handler, "code masqué")
+        self.assertEqual(physical_buttons["physical-reset-button"].onclick_handler, "clearSearch()")
+        self.assertEqual(legal_buttons["legal-search-button"].form_method, "GET")
+
+        report = format_search_mode_comparison(physical, legal)
+        self.assertIn("COMPARAISON DES MODES", report)
+        self.assertIn("Spécifiques physiques", report)
+        self.assertIn("Spécifiques morales", report)
+        self.assertIn("physical-search [POST · https://sidjilcom.cnrc.dz/fr/search/physical]", report)
+        self.assertIn("Bouton(s) Rechercher physiques : Rechercher", report)
+        self.assertIn("Bouton(s) Réinitialiser physiques : Réinitialiser", report)
+        complete_report = "\n".join(
+            (format_diagnostic(SimpleNamespace(title="Fixture", section="Test", url=DEFAULT_SIDJILCOM_URL), physical),
+             format_diagnostic(SimpleNamespace(title="Fixture", section="Test", url=DEFAULT_SIDJILCOM_URL), legal),
+             report)
+        )
+        for private in (
+            "PERSONNELLE FIXTURE", "ENTREPRISE PRIVEE", "DIRIGEANT PRIVE", "99887766",
+            "FIXTURE-TOKEN", "WILAYA-TOKEN", "COMMUNE-TOKEN", "FIXTURE-SESSION", "PRIVATE QUERY",
+            "PASSWORD-FIXTURE-SECRET", "CSRF-FIXTURE-SECRET", "submitSearch('PRIVATE')",
+            "clearSearch(this.form)",
+        ):
+            self.assertNotIn(private, complete_report)
+        self.assertNotIn("?token=", complete_report)
+        self.assertNotIn("?session=", complete_report)
 
     def test_accessible_iframe_html_fixture_can_be_inspected_as_its_own_document(self) -> None:
         fixture_path = Path(__file__).parent / "fixtures" / "sidjilcom_iframe_content.html"

@@ -10,7 +10,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
 
-from sidjily.sidjilcom.browser import BrowserAdapter, PageDiagnostics, PlaywrightBrowser
+from sidjily.sidjilcom.browser import (
+    BrowserAdapter,
+    PageDiagnostics,
+    PlaywrightBrowser,
+    SearchModeAnalysisError,
+)
 from sidjily.sidjilcom.config import SessionConfig
 from sidjily.sidjilcom.selectors import PageEvidence
 
@@ -179,6 +184,10 @@ class SidjilcomSessionManager:
         """Récupérer des métadonnées non sensibles de la page courante."""
         return self._submit_operation("diagnostics")
 
+    def diagnose_search_modes(self) -> Future[SessionDiagnostics]:
+        """Analyser les deux formulaires sans saisir ni soumettre de critères."""
+        return self._submit_operation("search_modes")
+
     def _submit_operation(self, name: str) -> Future[SessionDiagnostics]:
         future: Future[SessionDiagnostics] = Future()
         with self._lock:
@@ -268,7 +277,7 @@ class SidjilcomSessionManager:
                 browser.navigate_to_dashboard(self.config)
             elif command.name == "enterprise_search":
                 browser.navigate_to_enterprise_search(self.config)
-            elif command.name != "diagnostics":
+            elif command.name not in {"diagnostics", "search_modes"}:
                 raise SessionOperationError("Commande de navigation inconnue.")
 
             evidence = browser.inspect(self.config)
@@ -286,25 +295,44 @@ class SidjilcomSessionManager:
             protected_navigation = command.name in ("dashboard", "enterprise_search")
             if protected_navigation and state == SessionState.SESSION_EXPIRED:
                 raise SessionExpiredError()
-            page = browser.diagnostics(self.config)
+            if command.name == "search_modes" and state == SessionState.SESSION_EXPIRED:
+                raise SessionExpiredError()
+            if command.name == "search_modes" and state != SessionState.CONNECTED:
+                raise SessionNotConnected()
+            page = None if command.name == "search_modes" else browser.diagnostics(self.config)
 
             expected_section = {
                 "dashboard": "Tableau de bord",
                 "enterprise_search": "Trouver une entreprise",
             }.get(command.name)
             if protected_navigation and state != SessionState.CONNECTED:
-                if page.section == expected_section:
+                if page is not None and page.section == expected_section:
                     raise NavigationPageIncomplete()
                 raise SessionNotConnected()
-            if protected_navigation and page.section != expected_section:
+            if protected_navigation and page is not None and page.section != expected_section:
                 raise NavigationElementNotFound()
-            if command.name == "enterprise_search" and not page.visible_fields:
+            if command.name == "enterprise_search" and page is not None and not page.visible_fields:
                 raise NavigationPageIncomplete()
+            if command.name == "search_modes":
+                page = browser.diagnose_search_modes(self.config)
+                after_state = classify_session(
+                    browser.inspect(self.config), previously_connected=self._previously_connected
+                )
+                if after_state == SessionState.SESSION_EXPIRED:
+                    self._set_state(after_state)
+                    raise SessionExpiredError()
+                if after_state != SessionState.CONNECTED:
+                    self._set_state(after_state)
+                    raise SessionNotConnected()
+                self._set_state(after_state)
             if not command.future.done():
                 command.future.set_result(SessionDiagnostics(state=state, page=page))
         except SessionOperationError as exc:
             if not command.future.done():
                 command.future.set_exception(exc)
+        except SearchModeAnalysisError as exc:
+            if not command.future.done():
+                command.future.set_exception(SessionOperationError(str(exc)))
         except Exception as exc:
             # Les URL, messages de page et détails d'erreur peuvent contenir des données privées.
             self._logger.error("Échec de navigation Sidjilcom (type=%s).", type(exc).__name__)

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="fr">
+<body>
+  <!-- Fixture synthétique : ne décrit pas les champs réels du portail. -->
+  <div id="dz_cnrc_sidjilcom_recherchedetaillee_portlet_RechercheDetailleePortlet">
+    <form id="legal-search" aria-label="Recherche personnes morales" method="GET"
+          action="/fr/search/legal?session=FIXTURE-SESSION">
+      <fieldset>
+        <legend>Identification de la personne morale</legend>
+        <label for="legal-company">Raison sociale</label>
+        <input id="legal-company" name="company_name" type="text" required
+               class="form-control company-name" value="ENTREPRISE PRIVEE FIXTURE">
+        <label for="legal-registration">Numéro d'inscription</label>
+        <input id="legal-registration" name="registration_number" type="search" required>
+        <label for="legal-form">Forme juridique</label>
+        <select id="legal-form" name="legal_form" required>
+          <option value="spa">SPA</option><option value="sarl">SARL</option>
+        </select>
+        <label for="legal-status">Etat commerçant</label>
+        <select id="legal-status" name="merchant_status">
+          <option value="active">Actif</option><option value="closed">Radié</option>
+        </select>
+        <label for="legal-compliance">Conformité registre de commerce</label>
+        <input id="legal-compliance" name="compliance" type="checkbox" value="PRIVATE">
+        <label for="legal-manager">Dirigeant</label>
+        <input id="legal-manager" name="manager_name" type="text" value="DIRIGEANT PRIVE FIXTURE">
+        <label for="legal-date-to">Date fin</label>
+        <input id="legal-date-to" name="date_to" type="date" class="datepicker" value="2024-12-31">
+        <button id="legal-search-button" type="submit" onclick="searchNow()">Rechercher</button>
+        <button id="legal-reset-button" type="reset" onclick="clearSearch(this.form)">Réinitialiser</button>
+      </fieldset>
+    </form>
+    <input type="password" name="password" value="PASSWORD-FIXTURE-SECRET">
+  </div>
+</body>
+</html>
