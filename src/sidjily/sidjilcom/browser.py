@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import urljoin
 
 from sidjily.sidjilcom.config import SessionConfig
+from sidjily.sidjilcom.diagnostics import (
+    FormDiagnosticBundle,
+    build_form_diagnostics,
+    format_diagnostic,
+    sanitize_metadata_text,
+)
 from sidjily.sidjilcom.selectors import (
     DASHBOARD_ROUTE,
     DEFAULT_ENTERPRISE_SEARCH_ROUTE,
@@ -34,6 +39,8 @@ class PageDiagnostics:
     section: str
     navigation_items: tuple[NavigationItem, ...]
     visible_fields: tuple[str, ...]
+    form_diagnostics: FormDiagnosticBundle = FormDiagnosticBundle((), ())
+    report: str = ""
 
 
 class BrowserAdapter(Protocol):
@@ -166,7 +173,7 @@ class PlaywrightBrowser:
         self._page.goto(target, wait_until="domcontentloaded", timeout=config.navigation_timeout_ms)
 
     def diagnostics(self, config: SessionConfig) -> PageDiagnostics:
-        """Retourne uniquement des métadonnées de navigation et libellés, jamais des valeurs."""
+        """Retourne un rapport DOM structurel sans lire les valeurs des contrôles."""
         if self._page is None:
             raise RuntimeError("Navigateur non démarré.")
         current_url = self._page.url
@@ -183,27 +190,126 @@ class PlaywrightBrowser:
                 item = NavigationItem(label, sanitize_current_url(destination, config.url))
                 if item not in navigation_items:
                     navigation_items.append(item)
-        fields = self._page.locator("input:visible, select:visible, textarea:visible").evaluate_all(
-            """elements => elements
-                .filter(element => (element.getAttribute('type') || '').toLowerCase() !== 'password')
-                .map(element => {
+
+        raw = self._page.locator("input, select, textarea, button").evaluate_all(
+            """elements => {
+                const visible = element => {
+                    const style = window.getComputedStyle(element);
+                    return !!(element.getClientRects().length && style.visibility !== 'hidden' &&
+                        style.display !== 'none' && !element.closest('[hidden]'));
+                };
+                const dataAttributes = element => {
+                    const allowed = ['data-testid', 'data-test', 'data-qa', 'data-cy',
+                        'data-field', 'data-field-name', 'data-role'];
+                    const result = {};
+                    for (const name of allowed) {
+                        const value = element.getAttribute(name);
+                        if (value) result[name] = value;
+                    }
+                    return result;
+                };
+                const hierarchy = element => {
+                    const sets = [];
+                    let set = element.closest('fieldset');
+                    while (set) {
+                        sets.unshift(set);
+                        set = set.parentElement?.closest('fieldset') || null;
+                    }
+                    return sets.map(item => item.querySelector(':scope > legend')?.innerText?.trim() || '')
+                        .filter(Boolean).slice(0, 8);
+                };
+                const formInfo = element => {
+                    const form = element.closest('form');
+                    return {
+                        id: form?.id || (form ? `formulaire-${Array.from(document.forms).indexOf(form) + 1}` : 'hors-formulaire'),
+                        title: form?.getAttribute('aria-label') || form?.getAttribute('title') ||
+                            form?.querySelector('legend')?.innerText?.trim() || 'Formulaire'
+                    };
+                };
+                const allowedOptionLabels = ['type de personne', 'personne physique', 'personne morale',
+                    'wilaya', 'commune', 'secteur', 'activite', 'forme juridique', 'conformite',
+                    'etat commercant', 'nationalite', 'qualite'];
+                const sensitiveOptionLabels = ['nom', 'prenom', 'email', 'e-mail', 'telephone', 'date',
+                    'numero', 'inscription', 'raison sociale', 'commercial', 'dirigeant', 'adresse', 'nif', 'nis'];
+                const mayReadOptionText = label => {
+                    const normalized = label.normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
+                    const location = normalized.includes('wilaya') || normalized.includes('commune');
+                    if (sensitiveOptionLabels.some(word => normalized.includes(word)) && !location) return false;
+                    return allowedOptionLabels.some(word => normalized.includes(word));
+                };
+                const controls = [];
+                const buttons = [];
+                for (const element of elements) {
+                    if (!visible(element)) continue;
+                    const tag = element.tagName.toLowerCase();
+                    const type = (element.getAttribute('type') || (tag === 'input' ? 'text' : tag)).toLowerCase();
+                    if (tag === 'button' || (tag === 'input' && ['submit', 'button', 'reset'].includes(type))) {
+                        buttons.push({
+                            text: element.getAttribute('aria-label') || element.innerText?.trim() ||
+                                element.getAttribute('title') || '',
+                            html_type: type === 'button' && tag === 'button' ?
+                                (element.getAttribute('type') || 'submit') : type,
+                            role: element.getAttribute('role') || 'button',
+                            name: element.getAttribute('name') || '',
+                            id: element.id || '',
+                            data_attributes: dataAttributes(element),
+                            disabled: !!element.disabled,
+                            form_title: formInfo(element).title,
+                            hierarchy: hierarchy(element)
+                        });
+                        continue;
+                    }
+                    if (type === 'password' || type === 'hidden' || element.matches('[type="hidden"]')) continue;
                     const labels = Array.from(element.labels || [])
-                        .map(label => label.innerText.trim()).filter(Boolean);
-                    const label = element.getAttribute('aria-label') || labels[0] ||
-                        element.getAttribute('placeholder') || 'Champ sans libellé';
-                    const type = element.tagName.toLowerCase() === 'select' ? 'select' :
-                        (element.getAttribute('type') || element.tagName.toLowerCase());
-                    return `${label.slice(0, 100)} [${type}]`;
-                })"""
+                        .map(label => label.innerText?.trim() || '').filter(Boolean);
+                    const labelledBy = (element.getAttribute('aria-labelledby') || '').split(/\s+/)
+                        .map(id => document.getElementById(id)?.innerText?.trim() || '').filter(Boolean);
+                    const label = element.getAttribute('aria-label') || labels.join(' ') ||
+                        labelledBy.join(' ') || element.getAttribute('placeholder') || '';
+                    const form = formInfo(element);
+                    const options = tag === 'select' && mayReadOptionText(label) ?
+                        Array.from(element.options).slice(0, 100)
+                            .map(option => option.innerText?.trim() || '') : [];
+                    controls.push({
+                        label,
+                        associated_text: label,
+                        html_type: type,
+                        role: element.getAttribute('role') || '',
+                        name: element.getAttribute('name') || '',
+                        id: element.id || '',
+                        placeholder: element.getAttribute('placeholder') || '',
+                        data_attributes: dataAttributes(element),
+                        disabled: !!element.disabled,
+                        option_count: tag === 'select' ? element.options.length : 0,
+                        options,
+                        form_id: form.id,
+                        form_title: form.title,
+                        hierarchy: hierarchy(element)
+                    });
+                }
+                return {fields: controls, buttons};
+            }"""
         )
-        unique_fields = tuple(dict.fromkeys(str(field) for field in fields if field))[:80]
-        title = re.sub(r"\s+", " ", self._page.title()).strip()[:160]
-        return PageDiagnostics(
+        bundle = build_form_diagnostics(raw)
+        title = sanitize_metadata_text(self._page.title(), 160)
+        page = PageDiagnostics(
             url=sanitize_current_url(current_url, config.url),
             title=title,
             section=identify_section(current_url),
             navigation_items=tuple(navigation_items),
-            visible_fields=unique_fields,
+            visible_fields=tuple(
+                dict.fromkeys(f"{field.label} [{field.html_type}]" for form in bundle.forms for field in form.fields)
+            )[:80],
+            form_diagnostics=bundle,
+        )
+        return PageDiagnostics(
+            url=page.url,
+            title=page.title,
+            section=page.section,
+            navigation_items=page.navigation_items,
+            visible_fields=page.visible_fields,
+            form_diagnostics=bundle,
+            report=format_diagnostic(page, bundle),
         )
 
     def close(self) -> None:

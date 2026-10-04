@@ -20,7 +20,7 @@ L'ouverture publique des routes « Trouver une entreprise » et tableau de bord 
 2. Lancer SIDJILY et cliquer **Ouvrir Sidjilcom**. La fenêtre Chromium utilise le profil SIDJILY local.
 3. Si la page le demande, l'utilisateur saisit lui-même ses identifiants dans Chromium. Aucun identifiant ne doit être communiqué au développeur ou écrit dans un ticket.
 4. L'état de session est confirmé par le contenu réel de la page (marqueur de session, formulaire de connexion, avis d'expiration ou accès à une route protégée), pas par le seul marqueur local.
-5. Cliquer **Diagnostiquer la page** pour voir URL assainie, titre, section, liens connus et libellés/types des champs visibles — jamais leurs valeurs.
+5. Cliquer **Diagnostiquer la page** pour générer un rapport lisible par formulaire, champ et bouton : URL assainie, titre, section, hiérarchie, libellés, types/rôles, attributs structurels et état disabled. Les valeurs des champs ne sont jamais lues; les textes d'options ne sont retenus que pour les listes contrôlées non sensibles. Utiliser **Copier le diagnostic** ou **Enregistrer le diagnostic** pour transmettre ce rapport structurel.
 6. Cliquer **Tableau de bord** pour suivre le lien sémantique « Nos abonnés / tableau de bord », avec la route observée en fallback.
 7. Cliquer **Trouver une entreprise**. SIDJILY suit le lien sémantique visible, puis utilise la route publique observée en fallback. Une redirection vers la page de connexion est signalée; aucune recherche n'est soumise.
 8. **Accueil Sidjilcom** revient à la racine. La navigation s'arrête sur la page du formulaire pour validation; aucun critère n'est rempli.

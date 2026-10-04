@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 from sidjily.models import Search, Status
@@ -108,11 +108,29 @@ class SidjilyApp:
         self.diagnostics_button.pack(side="left")
         self.diagnostic_output = ttk.Label(
             navigation_panel,
-            text="Aucun diagnostic. Cette étape ne lance aucune recherche.",
+            text="Aucun diagnostic. Aucune valeur de champ, cookie ou jeton n'est collecté; aucune recherche n'est lancée.",
             wraplength=880,
             justify="left",
         )
         self.diagnostic_output.pack(anchor="w", pady=(6, 0))
+        report_toolbar = ttk.Frame(navigation_panel)
+        report_toolbar.pack(fill="x", pady=(6, 4))
+        self.copy_diagnostic_button = ttk.Button(
+            report_toolbar, text="Copier le diagnostic", command=self._copy_diagnostic, state="disabled"
+        )
+        self.copy_diagnostic_button.pack(side="left")
+        self.save_diagnostic_button = ttk.Button(
+            report_toolbar, text="Enregistrer le diagnostic", command=self._save_diagnostic, state="disabled"
+        )
+        self.save_diagnostic_button.pack(side="left", padx=8)
+        report_frame = ttk.Frame(navigation_panel)
+        report_frame.pack(fill="x")
+        self.diagnostic_text = tk.Text(report_frame, height=6, wrap="word", state="disabled", font=("Consolas", 9))
+        self.diagnostic_text.pack(side="left", fill="x", expand=True)
+        report_scrollbar = ttk.Scrollbar(report_frame, orient="vertical", command=self.diagnostic_text.yview)
+        report_scrollbar.pack(side="right", fill="y")
+        self.diagnostic_text.configure(yscrollcommand=report_scrollbar.set)
+        self._diagnostic_report = ""
 
         toolbar = ttk.Frame(container)
         toolbar.pack(fill="x", pady=(0, 10))
@@ -250,10 +268,52 @@ class SidjilyApp:
     def _diagnose_page(self) -> None:
         self._request_session_operation(self.session_manager.diagnose_page(), "Diagnostic de la page")
 
+    def _set_diagnostic_report(self, report: str) -> None:
+        self._diagnostic_report = report
+        self.diagnostic_text.configure(state="normal")
+        self.diagnostic_text.delete("1.0", "end")
+        if report:
+            self.diagnostic_text.insert("1.0", report)
+        else:
+            self.diagnostic_text.insert("1.0", "Aucun rapport de diagnostic disponible.")
+        self.diagnostic_text.configure(state="disabled")
+        state = "normal" if report else "disabled"
+        self.copy_diagnostic_button.configure(state=state)
+        self.save_diagnostic_button.configure(state=state)
+
+    def _copy_diagnostic(self) -> None:
+        if not self._diagnostic_report:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self._diagnostic_report)
+        self.root.update_idletasks()
+        self.diagnostic_output.configure(text="Diagnostic structurel copié dans le presse-papiers.")
+
+    def _save_diagnostic(self) -> None:
+        if not self._diagnostic_report:
+            return
+        destination = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Enregistrer le diagnostic Sidjilcom",
+            defaultextension=".txt",
+            initialfile="sidjily-diagnostic.txt",
+            filetypes=(("Rapport texte", "*.txt"), ("Tous les fichiers", "*.*")),
+        )
+        if not destination:
+            return
+        try:
+            with open(destination, "w", encoding="utf-8", newline="\n") as report_file:
+                report_file.write(self._diagnostic_report)
+        except OSError as exc:
+            messagebox.showerror("Enregistrement impossible", str(exc), parent=self.root)
+            return
+        self.diagnostic_output.configure(text=f"Diagnostic enregistré : {destination}")
+
     def _request_session_operation(self, future: Any, label: str) -> None:
         if self._pending_session_operation is not None and not self._pending_session_operation.done():
             return
         self._pending_session_operation = future
+        self._set_diagnostic_report("")
         self.diagnostic_output.configure(text=f"{label}…")
         self._refresh_session_status()
 
@@ -265,14 +325,17 @@ class SidjilyApp:
         try:
             result = future.result()
         except SessionOperationError as exc:
+            self._set_diagnostic_report("")
             self.diagnostic_output.configure(text=str(exc))
         except Exception:
+            self._set_diagnostic_report("")
             self.diagnostic_output.configure(text="Diagnostic impossible; consultez l'état du navigateur et du réseau.")
         else:
             page = result.page
             state_label = SESSION_LABELS[result.state][0]
             nav = ", ".join(f"{item.label}: {item.url}" for item in page.navigation_items) or "aucun lien reconnu"
             fields = ", ".join(page.visible_fields[:24]) or "aucun champ visible identifié"
+            self._set_diagnostic_report(page.report)
             self.diagnostic_output.configure(
                 text=(
                     f"État : {state_label} · "
