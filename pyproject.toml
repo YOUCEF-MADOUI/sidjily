@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Proprietary" }
 authors = [{ name = "Projet SIDJILY" }]
-dependencies = []
+dependencies = ["playwright>=1.48,<2"]
 
 [project.scripts]
 sidjily = "sidjily.main:main"

@@ -1,37 +1,48 @@
-# Architecture du socle
+# Architecture SIDJILY
 
 ## Organisation
 
 ```text
 src/sidjily/
-  main.py             Démarrage, chemins locaux et récupération au lancement
-  paths.py            Emplacements de données Windows/POSIX
-  logging_config.py   Journal de fichier avec rotation
-  models.py           Modèles et statuts communs
-  database.py         Connexions SQLite, schéma initial et événements
-  task_manager.py     Cycle de vie des recherches et tâches persistantes
-  ui/app.py           Interface Tkinter initiale en français
+  main.py                Démarrage, récupération des tâches et injection des services
+  paths.py               Répertoires locaux utilisateur et profil Chromium dédié
+  logging_config.py      Journal de fichier avec rotation
+  models.py              Modèles et états des tâches
+  database.py            Connexions SQLite, schéma initial et événements
+  task_manager.py        Cycle de vie des recherches et tâches persistantes
+  sidjilcom/
+    config.py             URL officielle, profil et options Chromium
+    browser.py            Adaptateur Playwright isolé derrière un protocole
+    selectors.py          Indices DOM et classification conservatrice de session
+    session.py             Cycle de vie thread-safe et états publics
+  ui/app.py              Interface Tkinter française, tâches et connexion Sidjilcom
 tests/
   test_task_manager.py
+  test_sidjilcom_session.py
 ```
 
-## Flux actuel
+## Session Sidjilcom
 
-1. L'interface crée une recherche avec des critères JSON et une tâche racine en attente.
-2. `TaskManager` réserve une tâche et persiste chaque changement d'état.
-3. Une tâche parente peut être clôturée en ajoutant atomiquement ses sous-tâches.
-4. Une suspension transforme les tâches non terminées en tâches suspendues ; une reprise les remet en attente sans toucher aux tâches terminées.
-5. Au démarrage, les tâches restées en cours sont remises en attente et la recherche correspondante devient suspendue. La progression déjà terminée reste enregistrée.
-6. Chaque événement est conservé dans SQLite. Les erreurs inattendues de l'application sont également écrites dans le journal tournant du système utilisateur.
+1. L'interface demande au gestionnaire de session d'ouvrir Chromium dans un thread dédié.
+2. Playwright lance un contexte persistant dans `browser_profile_dir()`, jamais dans le profil Chrome de l'utilisateur, puis ouvre l'URL HTTPS officielle.
+3. L'utilisateur s'authentifie manuellement dans cette fenêtre. Le code ne lit pas la valeur des champs, les cookies, le stockage web ou les mots de passe.
+4. Le navigateur vérifie à intervalle régulier uniquement le domaine courant, la présence d'un champ mot de passe, quelques avis d'expiration visibles et des marqueurs sémantiques de déconnexion.
+5. Un indicateur de connexion positive est requis avant d'annoncer « Connecté ». Les indices DOM sont centralisés dans `sidjilcom/selectors.py` afin de les adapter si le portail évolue.
+6. Après une connexion confirmée, un marqueur local vide est créé dans le profil. Il indique uniquement qu'une session avait déjà été établie et permet de détecter une demande de reconnexion après redémarrage.
+7. La fermeture ferme Chromium et conserve le profil local. Une session expirée ne modifie pas SQLite ni les recherches existantes.
 
-## États
+États affichés : `DISCONNECTED`, `CONNECTING`, `WAITING_FOR_LOGIN`, `CONNECTED`, `SESSION_EXPIRED`, `ERROR`; `DISCONNECTING` est un état transitoire de fermeture.
 
-Les états persistés partagés sont : `pending` (en attente), `running` (en cours), `completed` (terminée), `failed` (échec), `retry` (à réessayer), `suspended` (suspendue) et `cancelled` (annulée). Les noms enregistrés sont indépendants des libellés français de l'interface.
+## Configuration
+
+`SessionConfig` impose HTTPS et l'hôte `sidjilcom.cnrc.dz`; il refuse les credentials, paramètres et fragments dans l'URL. Par défaut, Chromium est visible et le profil est placé dans le répertoire de données utilisateur SIDJILY. `SIDJILY_BROWSER_HEADLESS`, `SIDJILY_BROWSER_PROFILE` et `SIDJILY_SIDJILCOM_URL` permettent de configurer ces options sans coder de secrets.
 
 ## Sécurité et limites
 
-Cette version ne contient aucun client HTTP, navigateur automatisé, identifiant ou mécanisme de contournement. Les futurs adaptateurs Sidjilcom devront rester dans les droits du compte de l'utilisateur, utiliser une connexion manuelle et ne pas contourner CAPTCHA, authentification ou protections du service. Les appels réseau et règles d'extraction devront être isolés des composants SQLite et interface.
+Le dossier de profil est un secret local au même titre qu'un état de connexion : ne pas le partager ni le committer. `.gitignore` exclut le profil, cookies, fichiers de stockage Playwright, la base et les logs. Les événements de session ne contiennent que les changements d'état; les messages de page, URL courantes, valeurs de formulaire et exceptions complètes ne sont jamais journalisés.
 
-## Évolution du schéma
+Le détecteur est volontairement prudent : il ne marque la session active qu'avec un marqueur explicite de session utilisateur (p. ex. une commande de déconnexion), et traite une page de connexion après une session active comme expirée. Il ne résout ni CAPTCHA ni protection anti-bot. Les textes/attributs du portail peuvent changer; une vérification avec un vrai compte autorisé reste nécessaire pour valider les marqueurs de connexion. Si aucun marqueur positif n'existe sur l'écran connecté de Sidjilcom, le détecteur restera en attente jusqu'à adaptation des sélecteurs, plutôt que d'annoncer une connexion non confirmée.
 
-`PRAGMA user_version` identifie la version de schéma. Toute évolution devra ajouter une migration versionnée ; ne pas supprimer ni recréer la base existante pour mettre à jour l'application. Les résultats disposent d'une clé de déduplication unique par recherche, prête à être utilisée lorsque le module de collecte sera ajouté.
+## Recherches et schéma SQLite
+
+`TaskManager` persiste les recherches, tâches, événements et progression. La tâche 2 ne change pas le schéma SQLite et n'ajoute pas de moteur de recherche ou d'extraction. `PRAGMA user_version` identifie le schéma; toute évolution future devra ajouter une migration versionnée et ne pas recréer la base existante.

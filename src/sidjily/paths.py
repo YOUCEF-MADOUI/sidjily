@@ -15,3 +15,8 @@ def user_data_dir() -> Path:
     else:
         base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
     return base / APP_DIRECTORY
+
+
+def browser_profile_dir() -> Path:
+    """Profil Chromium privé à SIDJILY, séparé du profil Chrome personnel."""
+    return user_data_dir() / "browser_profile"

@@ -9,10 +9,20 @@ venv/
 .coverage
 htmlcov/
 
-# Application data (database, logs, browser profile)
+# Application data (databases, logs, and persistent authentication state)
 data/
+**/browser_profile/
+**/.sidjily-session-established
+**/playwright/.auth/
+**/Cookies
+**/Network/Cookies
+**/Login Data
+**/Local State
+**/Web Data
 *.sqlite3
 *.db
+*.har
+storage_state*.json
 
 # Editors and OS
 .idea/

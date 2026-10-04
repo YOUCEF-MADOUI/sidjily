@@ -7,6 +7,8 @@ import logging
 from sidjily.database import Database
 from sidjily.logging_config import configure_logging
 from sidjily.paths import user_data_dir
+from sidjily.sidjilcom.config import SessionConfig
+from sidjily.sidjilcom.session import SidjilcomSessionManager
 from sidjily.task_manager import TaskManager
 
 
@@ -27,8 +29,9 @@ def main() -> None:
             raise RuntimeError(
                 "Tkinter est requis pour l'interface. Sous Windows, installez Python avec le composant Tcl/Tk."
             ) from exc
+        session_manager = SidjilcomSessionManager(SessionConfig.from_environment())
         root = tk.Tk()
-        SidjilyApp(root, manager)
+        SidjilyApp(root, manager, session_manager)
         root.mainloop()
     except Exception:
         logger.exception("Erreur fatale de l'application.")

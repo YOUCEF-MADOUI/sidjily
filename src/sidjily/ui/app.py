@@ -7,6 +7,7 @@ from tkinter import messagebox, ttk
 from typing import Any
 
 from sidjily.models import Search, Status
+from sidjily.sidjilcom.session import SessionState, SidjilcomSessionManager
 from sidjily.task_manager import InvalidTransition, TaskManager
 
 
@@ -20,17 +21,36 @@ STATUS_LABELS = {
     Status.CANCELLED: "Annulée",
 }
 
+SESSION_LABELS = {
+    SessionState.DISCONNECTED: ("🔴 Non connecté", "#b42318"),
+    SessionState.CONNECTING: ("🟡 Connexion en cours", "#946200"),
+    SessionState.WAITING_FOR_LOGIN: ("🟡 Connexion en attente", "#946200"),
+    SessionState.CONNECTED: ("🟢 Connecté", "#027a48"),
+    SessionState.SESSION_EXPIRED: ("🔴 Session expirée", "#b42318"),
+    SessionState.ERROR: ("🔴 Erreur", "#b42318"),
+    SessionState.DISCONNECTING: ("🟡 Fermeture en cours", "#946200"),
+}
+
 
 class SidjilyApp:
-    def __init__(self, root: tk.Tk, manager: TaskManager):
+    def __init__(
+        self,
+        root: tk.Tk,
+        manager: TaskManager,
+        session_manager: SidjilcomSessionManager | None = None,
+    ):
         self.root = root
         self.manager = manager
+        self.session_manager = session_manager or SidjilcomSessionManager()
+        self._closing = False
         self.root.title("SIDJILY — Gestion des recherches")
         self.root.geometry("940x600")
         self.root.minsize(760, 460)
         self.selected_search_id: str | None = None
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_ui()
         self.refresh()
+        self._poll_session()
 
     def _build_ui(self) -> None:
         container = ttk.Frame(self.root, padding=18)
@@ -38,9 +58,32 @@ class SidjilyApp:
         ttk.Label(container, text="SIDJILY", font=("Segoe UI", 22, "bold")).pack(anchor="w")
         ttk.Label(
             container,
-            text="Recherches persistantes — le connecteur Sidjilcom sera ajouté dans une prochaine étape.",
+            text="Session Sidjilcom manuelle disponible — recherche et collecte prévues dans les prochaines étapes.",
             wraplength=880,
-        ).pack(anchor="w", pady=(2, 14))
+        ).pack(anchor="w", pady=(2, 12))
+
+        session_panel = ttk.LabelFrame(container, text="Connexion Sidjilcom", padding=10)
+        session_panel.pack(fill="x", pady=(0, 12))
+        session_info = ttk.Frame(session_panel)
+        session_info.pack(side="left", fill="x", expand=True)
+        self.session_indicator = ttk.Label(session_info, text="🔴 Non connecté", font=("Segoe UI", 10, "bold"))
+        self.session_indicator.pack(anchor="w")
+        self.session_message = ttk.Label(session_info, text="Aucune session Sidjilcom ouverte.", wraplength=520)
+        self.session_message.pack(anchor="w", pady=(3, 0))
+        session_buttons = ttk.Frame(session_panel)
+        session_buttons.pack(side="right", padx=(10, 0))
+        self.connect_button = ttk.Button(
+            session_buttons, text="Se connecter à Sidjilcom", command=self._connect_sidjilcom
+        )
+        self.connect_button.pack(side="left")
+        self.verify_button = ttk.Button(
+            session_buttons, text="Vérifier la session", command=self._verify_sidjilcom
+        )
+        self.verify_button.pack(side="left", padx=6)
+        self.disconnect_button = ttk.Button(
+            session_buttons, text="Déconnecter", command=self._disconnect_sidjilcom
+        )
+        self.disconnect_button.pack(side="left")
 
         toolbar = ttk.Frame(container)
         toolbar.pack(fill="x", pady=(0, 10))
@@ -151,6 +194,47 @@ class SidjilyApp:
     @staticmethod
     def _format_criteria(criteria: dict[str, Any]) -> str:
         return " · ".join(f"{key}: {value}" for key, value in criteria.items() if value) or "—"
+
+    def _connect_sidjilcom(self) -> None:
+        self.session_manager.connect()
+        self._refresh_session_status()
+
+    def _verify_sidjilcom(self) -> None:
+        self.session_manager.verify_session()
+        self._refresh_session_status()
+
+    def _disconnect_sidjilcom(self) -> None:
+        self.session_manager.disconnect()
+        self._refresh_session_status()
+
+    def _refresh_session_status(self) -> None:
+        snapshot = self.session_manager.snapshot
+        label, color = SESSION_LABELS[snapshot.state]
+        self.session_indicator.configure(text=label, foreground=color)
+        self.session_message.configure(text=snapshot.message)
+        running = self.session_manager.is_running
+        busy = snapshot.state in (SessionState.CONNECTING, SessionState.DISCONNECTING)
+        self.connect_button.configure(
+            state="disabled" if busy or snapshot.state == SessionState.CONNECTED else "normal"
+        )
+        self.verify_button.configure(state="normal" if running and not busy else "disabled")
+        self.disconnect_button.configure(state="normal" if running and not busy else "disabled")
+
+    def _poll_session(self) -> None:
+        self._refresh_session_status()
+        if not self._closing:
+            self.root.after(500, self._poll_session)
+
+    def _on_close(self) -> None:
+        self._closing = True
+        self.session_manager.disconnect()
+        self._finish_close_after_session()
+
+    def _finish_close_after_session(self) -> None:
+        if self.session_manager.is_running:
+            self.root.after(100, self._finish_close_after_session)
+        else:
+            self.root.destroy()
 
 
 class _NewSearchDialog:
