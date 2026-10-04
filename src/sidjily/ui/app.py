@@ -7,6 +7,14 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 from sidjily.models import Search, Status
+from sidjily.sidjilcom.criteria import (
+    CriteriaValidationError,
+    SearchCriteria,
+    SearchMode,
+    criteria_from_mapping,
+    criteria_to_mapping,
+    format_criteria_preview,
+)
 from sidjily.sidjilcom.session import SessionOperationError, SessionState, SidjilcomSessionManager
 from sidjily.task_manager import InvalidTransition, TaskManager
 
@@ -191,9 +199,11 @@ class SidjilyApp:
         if dialog.result is None:
             return
         name, criteria = dialog.result
-        self.manager.create_search(name, criteria)
+        self.manager.create_search(name, criteria_to_mapping(criteria))
         self.refresh()
-        self.footer.configure(text="Recherche enregistrée en attente. Aucun accès réseau n'est effectué dans cette version.")
+        self.footer.configure(
+            text="Brouillon enregistré localement. L'aperçu n'a envoyé aucune requête Sidjilcom."
+        )
 
     def resume_selected(self) -> None:
         search = self._selected_search()
@@ -407,55 +417,266 @@ class SidjilyApp:
 
 
 class _NewSearchDialog:
+    """Saisie locale, validation et aperçu des critères (sans appel au portail)."""
+
     def __init__(self, parent: tk.Tk):
-        self.result: tuple[str, dict[str, Any]] | None = None
+        self.result: tuple[str, SearchCriteria] | None = None
         self.window = tk.Toplevel(parent)
-        self.window.title("Nouvelle recherche")
+        self.window.title("Préparer une recherche Sidjilcom")
         self.window.transient(parent)
         self.window.grab_set()
-        self.window.resizable(False, False)
-        frame = ttk.Frame(self.window, padding=16)
-        frame.pack(fill="both", expand=True)
-        self.name = tk.StringVar(value="Nouvelle recherche")
-        self.person_type = tk.StringVar(value="Personne morale")
-        self.activity = tk.StringVar()
-        self.wilaya = tk.StringVar()
-        self.commune = tk.StringVar()
-        self.period = tk.StringVar()
-        fields = [
-            ("Nom de la recherche", self.name),
-            ("Type de personne", self.person_type),
-            ("Code activité", self.activity),
-            ("Wilaya", self.wilaya),
-            ("Commune", self.commune),
-            ("Période (facultatif)", self.period),
-        ]
-        for row, (label, variable) in enumerate(fields):
-            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=5)
-            if label == "Type de personne":
-                ttk.Combobox(
-                    frame, textvariable=variable, values=("Personne morale", "Personne physique"),
-                    state="readonly", width=32,
-                ).grid(row=row, column=1, sticky="ew", pady=5)
-            else:
-                ttk.Entry(frame, textvariable=variable, width=36).grid(row=row, column=1, sticky="ew", pady=5)
-        buttons = ttk.Frame(frame)
-        buttons.grid(row=len(fields), column=0, columnspan=2, sticky="e", pady=(12, 0))
-        ttk.Button(buttons, text="Annuler", command=self.window.destroy).pack(side="right")
-        ttk.Button(buttons, text="Créer", command=self._submit).pack(side="right", padx=8)
-        self.window.bind("<Return>", lambda _event: self._submit())
+        self.window.geometry("1080x800")
+        self.window.minsize(900, 650)
 
-    def _submit(self) -> None:
+        self.name = tk.StringVar(value="Nouvelle recherche")
+        self.mode = tk.StringVar(value="")
+        self._variables: dict[str, tk.StringVar] = {}
+        self._specific_variables: dict[str, tk.StringVar] = {}
+        self._watched: set[str] = set()
+
+        frame = ttk.Frame(self.window, padding=14)
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(3, weight=1)
+        ttk.Label(frame, text="Préparer une recherche", font=("Segoe UI", 15, "bold")).grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+
+        identity = ttk.Frame(frame)
+        identity.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        identity.columnconfigure(1, weight=1)
+        ttk.Label(identity, text="Nom du brouillon").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Entry(identity, textvariable=self.name, width=38).grid(row=0, column=1, sticky="ew", padx=(0, 18))
+        ttk.Label(identity, text="Mode obligatoire").grid(row=0, column=2, sticky="w", padx=(0, 8))
+        ttk.Combobox(
+            identity,
+            textvariable=self.mode,
+            values=("Personne physique", "Personne morale"),
+            state="readonly",
+            width=24,
+        ).grid(row=0, column=3, sticky="w")
+
+        common_frame = ttk.LabelFrame(frame, text="Critères communs — tous facultatifs", padding=8)
+        common_frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        common_frame.columnconfigure(1, weight=1)
+        common_frame.columnconfigure(3, weight=1)
+        common_specs = (
+            ("nrc1", "N° d'inscription — nrc1", "text", ()),
+            ("nrc2", "N° d'inscription — nrc2", "disabled_select", ()),
+            ("nrc3", "N° d'inscription — nrc3", "text", ()),
+            ("nrc4", "N° d'inscription — nrc4", "text", ()),
+            ("nrc5", "N° d'inscription — nrc5", "disabled_select", ()),
+            ("commune_wilaya", "Commune/Wilaya d'inscription", "autocomplete", ()),
+            ("secteur_activite", "Secteur d'activité", "disabled_select", ()),
+            ("activite", "Activité", "autocomplete", ()),
+            ("date_inscription_du", "Date d'inscription — Du", "text", ()),
+            ("date_inscription_au", "Date d'inscription — Au", "text", ()),
+            ("conformite_rc", "Conformité RC", "disabled_select", ()),
+            ("etat_commercant", "État commerçant", "disabled_select", ()),
+        )
+        for index, (key, label, kind, choices) in enumerate(common_specs):
+            self._add_control(
+                common_frame, index // 2, (index % 2) * 2,
+                key, label, kind, choices, self._variables,
+            )
+        ttk.Label(
+            common_frame,
+            text=(
+                "Dates au format AAAA-MM-JJ. nrc1 à nrc5 restent des composants distincts; "
+                "leur signification doit être confirmée avant toute saisie automatique."
+            ),
+            wraplength=950,
+            foreground="#555555",
+        ).grid(row=(len(common_specs) + 1) // 2, column=0, columnspan=4, sticky="w", pady=(7, 0))
+
+        self.specific_frame = ttk.LabelFrame(frame, text="Critères spécifiques au mode", padding=8)
+        self.specific_frame.grid(row=3, column=0, sticky="nsew", pady=(0, 8))
+        self.specific_frame.columnconfigure(1, weight=1)
+        self.specific_frame.columnconfigure(3, weight=1)
+        self.mode_hint = ttk.Label(
+            self.specific_frame,
+            text="Choisissez Personne physique ou Personne morale pour afficher ses critères.",
+            wraplength=950,
+        )
+        self.mode_hint.grid(row=0, column=0, columnspan=4, sticky="w")
+
+        preview_frame = ttk.LabelFrame(frame, text="Aperçu local — aucune recherche ne sera lancée", padding=8)
+        preview_frame.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+        self.preview = tk.Text(preview_frame, height=6, wrap="word", state="disabled", font=("Consolas", 9))
+        self.preview.pack(fill="both", expand=True)
+        self.status = ttk.Label(frame, text="Choisissez un mode, puis préparez un aperçu.", wraplength=950)
+        self.status.grid(row=5, column=0, sticky="w", pady=(0, 6))
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=6, column=0, sticky="e")
+        ttk.Button(buttons, text="Annuler", command=self.window.destroy).pack(side="right")
+        self.save_button = ttk.Button(
+            buttons, text="Enregistrer le brouillon", command=self._save_draft, state="disabled"
+        )
+        self.save_button.pack(side="right", padx=8)
+        ttk.Button(buttons, text="Préparer la recherche", command=self._prepare_preview).pack(side="right")
+
+        self._watch(self.name)
+        self._watch(self.mode)
+        self.mode.trace_add("write", self._on_mode_change)
+        self.window.bind("<Return>", lambda _event: self._prepare_preview())
+        self.window.bind("<Escape>", lambda _event: self.window.destroy())
+
+    def _watch(self, variable: tk.StringVar) -> None:
+        key = str(variable)
+        if key not in self._watched:
+            variable.trace_add("write", self._invalidate_preview)
+            self._watched.add(key)
+
+    def _add_control(
+        self,
+        parent: ttk.LabelFrame,
+        row: int,
+        column: int,
+        key: str,
+        label: str,
+        kind: str,
+        choices: tuple[str, ...],
+        storage: dict[str, tk.StringVar],
+    ) -> None:
+        variable = tk.StringVar()
+        storage[key] = variable
+        self._variables[key] = variable
+        self._watch(variable)
+        rendered_label = label
+        if kind == "autocomplete":
+            rendered_label += " · suggestions non interrogées"
+        elif kind == "disabled_select":
+            rendered_label += " · options non fournies"
+        ttk.Label(parent, text=rendered_label).grid(
+            row=row, column=column, sticky="w", padx=(2, 7), pady=3
+        )
+        if kind == "enum":
+            ttk.Combobox(
+                parent, textvariable=variable, values=("",) + choices,
+                state="readonly", width=25,
+            ).grid(row=row, column=column + 1, sticky="ew", padx=(0, 12), pady=3)
+        elif kind == "disabled_select":
+            ttk.Combobox(
+                parent, textvariable=variable, values=(), state="disabled", width=25,
+            ).grid(row=row, column=column + 1, sticky="ew", padx=(0, 12), pady=3)
+        else:
+            ttk.Entry(parent, textvariable=variable, width=28).grid(
+                row=row, column=column + 1, sticky="ew", padx=(0, 12), pady=3
+            )
+
+    def _on_mode_change(self, *_args: object) -> None:
+        self._invalidate_preview()
+        self._render_specific_fields()
+
+    def _render_specific_fields(self) -> None:
+        for child in self.specific_frame.winfo_children():
+            child.destroy()
+        self._specific_variables.clear()
+        mode_specs: dict[str, tuple[tuple[str, str, str, tuple[str, ...]], ...]] = {
+            "Personne physique": (
+                ("nom", "Nom", "text", ()),
+                ("prenom", "Prénom", "text", ()),
+                ("nom_commercial", "Nom commercial", "text", ()),
+                ("date_naissance", "Date de naissance", "text", ()),
+                ("presume", "Présumé", "disabled_select", ()),
+                ("nationalite", "Nationalité", "autocomplete", ()),
+            ),
+            "Personne morale": (
+                ("raison_sociale", "Raison Sociale / Nom commercial", "text", ()),
+                ("forme_juridique", "Forme Juridique", "disabled_select", ()),
+                ("nom_prenom_dirigeant", "Nom / Prénom du dirigeant", "text", ()),
+                ("date_naissance_dirigeant", "Date de naissance du dirigeant", "text", ()),
+                ("presume", "Présumé", "disabled_select", ()),
+                ("nationalite", "Nationalité", "autocomplete", ()),
+                ("qualite", "Qualité", "disabled_select", ()),
+            ),
+        }
+        specs = mode_specs.get(self.mode.get())
+        if specs is None:
+            self.mode_hint = ttk.Label(
+                self.specific_frame,
+                text="Choisissez Personne physique ou Personne morale pour afficher ses critères.",
+                wraplength=950,
+            )
+            self.mode_hint.grid(row=0, column=0, columnspan=4, sticky="w")
+            return
+        self.mode_hint = ttk.Label(
+            self.specific_frame,
+            text="Tous ces critères sont facultatifs. Les options non fournies restent désactivées.",
+            wraplength=950,
+        )
+        self.mode_hint.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 4))
+        for index, (key, label, kind, choices) in enumerate(specs):
+            self._add_control(
+                self.specific_frame, 1 + index // 2, (index % 2) * 2,
+                key, label, kind, choices, self._specific_variables,
+            )
+
+    def _invalidate_preview(self, *_args: object) -> None:
+        if hasattr(self, "save_button"):
+            self.save_button.configure(state="disabled")
+            self.status.configure(text="Les critères ont changé; préparez à nouveau l'aperçu.")
+            self._set_preview("")
+
+    def _build_criteria(self) -> SearchCriteria:
+        mode_by_label = {
+            "Personne physique": SearchMode.PERSONNE_PHYSIQUE,
+            "Personne morale": SearchMode.PERSONNE_MORALE,
+        }
+        mode = mode_by_label.get(self.mode.get())
+        if mode is None:
+            raise CriteriaValidationError("Le mode de recherche est obligatoire.")
+        payload: dict[str, Any] = {
+            "mode": mode.value,
+            "numero_inscription": {
+                key: self._variables[key].get().strip()
+                for key in ("nrc1", "nrc2", "nrc3", "nrc4", "nrc5")
+            },
+            "commune_wilaya": self._variables["commune_wilaya"].get(),
+            "secteur_activite": self._variables["secteur_activite"].get(),
+            "activite": self._variables["activite"].get(),
+            "date_inscription_du": self._variables["date_inscription_du"].get(),
+            "date_inscription_au": self._variables["date_inscription_au"].get(),
+            "conformite_rc": self._variables["conformite_rc"].get(),
+            "etat_commercant": self._variables["etat_commercant"].get(),
+        }
+        payload.update({key: variable.get() for key, variable in self._specific_variables.items()})
+        return criteria_from_mapping(payload)
+
+    def _prepare_preview(self) -> None:
+        if not self.name.get().strip():
+            messagebox.showwarning("Nom requis", "Saisissez un nom pour ce brouillon.", parent=self.window)
+            return
+        try:
+            criteria = self._build_criteria()
+            preview_text = format_criteria_preview(criteria)
+        except CriteriaValidationError as exc:
+            self.save_button.configure(state="disabled")
+            self.status.configure(text="Les critères ne sont pas valides.")
+            messagebox.showwarning("Critères invalides", str(exc), parent=self.window)
+            return
+        self._set_preview(preview_text)
+        self.status.configure(text="Aperçu prêt; aucune requête ou autocomplétion distante n'a été déclenchée.")
+        self.save_button.configure(state="normal")
+
+    def _set_preview(self, text: str) -> None:
+        self.preview.configure(state="normal")
+        self.preview.delete("1.0", "end")
+        if text:
+            self.preview.insert("1.0", text)
+        self.preview.configure(state="disabled")
+
+    def _save_draft(self) -> None:
         name = self.name.get().strip()
         if not name:
-            messagebox.showwarning("Nom requis", "Saisissez un nom pour cette recherche.", parent=self.window)
+            messagebox.showwarning("Nom requis", "Saisissez un nom pour ce brouillon.", parent=self.window)
             return
-        criteria = {
-            "type_personne": self.person_type.get(),
-            "code_activite": self.activity.get().strip() or None,
-            "wilaya": self.wilaya.get().strip() or None,
-            "commune": self.commune.get().strip() or None,
-            "periode": self.period.get().strip() or None,
-        }
+        try:
+            criteria = self._build_criteria()
+        except CriteriaValidationError as exc:
+            self.save_button.configure(state="disabled")
+            messagebox.showwarning("Critères invalides", str(exc), parent=self.window)
+            return
         self.result = name, criteria
         self.window.destroy()

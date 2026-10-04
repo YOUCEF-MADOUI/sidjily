@@ -12,7 +12,17 @@ Inspection sans compte ni soumission de formulaire, le 4 octobre 2026 :
 | Nos abonnés / tableau de bord | `/group/sidjilcom/mon-tableau-de-bord` |
 | Accueil | `/` |
 
-L'ouverture publique des routes « Trouver une entreprise » et tableau de bord a redirigé vers `/web/sidjilcom/login` avec une redirection de retour vers la page demandée. Le formulaire de recherche et le tableau de bord eux-mêmes n'étaient donc pas consultables sans authentification. Les champs métier (numéro d'inscription, raison sociale, activité, wilaya/commune, période, dirigeant, etc.) **ne sont pas déclarés comme observés** à ce stade.
+L'ouverture publique des routes « Trouver une entreprise » et tableau de bord a redirigé vers `/web/sidjilcom/login` avec une redirection de retour vers la page demandée. Cette inspection publique ne donnait pas accès au formulaire authentifié; elle ne permettait donc pas d'en relever les contrôles.
+
+## Rapport réel transmis par l'utilisateur — critères (Tâche 10)
+
+Le rapport réel validé par l'utilisateur est la référence fonctionnelle pour le modèle et l'aperçu local de `src/sidjily/sidjilcom/criteria.py`. Il décrit un formulaire `POST`, 20 contrôles en mode `PERSONNE_PHYSIQUE` et 21 en mode `PERSONNE_MORALE`. Le mapping exploitable porte sur 18 et 19 contrôles respectivement; les deux contrôles restants par mode ne sont pas décrits avec assez de détails et ne sont pas inventés.
+
+Suffixes communs connus : `wilcom` (Commune/Wilaya d'inscription), `secteu` (Secteur d'activité), `activi` (Activité), `deb_im` / `fin_im` (dates d'inscription), `CRCE` (Conformité RC), `etat_c` (État commerçant), et `nrc1` à `nrc5` (composants distincts du numéro d'inscription). Mode physique : `nom`, `prenom`, `nom_co`, `d_nais`, `presum`, `nation`. Mode moral : `raison`, `forme_`, `nom_pr`, `d_nais`, `presum`, `nation`, `qualit`. Les suffixes sont connus, mais les préfixes complets des attributs `name`, les identifiants DOM et certaines propriétés de contrôles ne sont pas fournis.
+
+Les autocomplétions `wilcom`, `activi` et `nation` sont rapportées comme des inputs de classe `yui3-aclist-input` avec `aria-autocomplete="list"`. Les valeurs et nombres d'options des listes ne sont pas transmis; ces contrôles restent désactivés dans l'interface et aucune option n'est inventée, y compris pour `nrc2` et `nrc5`. Les cinq composants `nrc1`…`nrc5` sont modélisés séparément, sans signification supposée; cette signification doit être confirmée avant toute saisie automatique.
+
+L'interface permet de sélectionner le mode, de remplir des critères locaux facultatifs et de produire un aperçu. L'autocomplétion n'est pas interrogée. L'aperçu et l'enregistrement du brouillon n'envoient aucune requête Sidjilcom et ne cliquent pas sur **Rechercher**.
 
 ## Validation manuelle avec le compte de l'utilisateur
 
@@ -30,7 +40,7 @@ Si la session expire, l'application affiche « Votre session Sidjilcom a expiré
 
 ## Limites connues
 
-- Aucune connexion utilisateur réelle n'a été effectuée durant le développement; l'accès au formulaire et ses libellés restent à confirmer manuellement.
+- L'agent n'a pas ouvert de session réelle. Le rapport authentifié ci-dessus a été validé et transmis par l'utilisateur; les détails absents de ce rapport complet restent à confirmer avant d'étendre le mapping.
 - Les sélecteurs de session reposent sur des textes/attributs sémantiques connus et les routes visibles publiquement. Ils sont isolés dans `src/sidjily/sidjilcom/selectors.py` et doivent être ajustés si le portail évolue.
 - Si le portail ne présente pas de marqueur de session reconnu, SIDJILY reste volontairement en attente jusqu'à ce qu'un formulaire protégé accessible confirme l'accès.
 - La tâche ne remplit aucun champ, ne déclenche aucune recherche et ne collecte aucun résultat.
