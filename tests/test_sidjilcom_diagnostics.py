@@ -58,7 +58,7 @@ class DiagnosticFixtureTests(unittest.TestCase):
         self.assertTrue(all(field.hierarchy == ("Critères de recherche",) for field in fields.values()))
         self.assertEqual(len(bundle.buttons), 2)
         self.assertEqual(bundle.buttons[0].text, "Rechercher")
-        self.assertEqual(bundle.buttons[1].text, "Texte masqué (action non classifiée)")
+        self.assertEqual(bundle.buttons[1].text, "Texte masqué (potentiellement sensible)")
 
         rendered = format_diagnostic(
             SimpleNamespace(
@@ -127,7 +127,26 @@ class BrowserDiagnosticMockTests(unittest.TestCase):
                 },
             ],
             "buttons": [{"text": "Rechercher dossier privé", "html_type": "submit", "tag_name": "button"}],
-            "clickables": [{"text": "Voir details confidentiels", "tag_name": "a", "role": "link", "nature": "élément cliquable"}],
+            "clickables": (
+                [
+                    {"text": f"Lien navigation {index}", "tag_name": "a", "role": "link", "href": f"/fr/navigation/{index}"}
+                    for index in range(1, 30)
+                ]
+                + [
+                    {
+                        "text": "Personne physique", "tag_name": "a", "role": "link",
+                        "id": "entry-30", "class_name": "mode-choice physical-choice",
+                        "aria_label": "Personne physique",
+                        "href": "/fr/repertoire/personne-physique?token=PHYSICAL-TOKEN",
+                    },
+                    {
+                        "text": "Personne morale", "tag_name": "a", "role": "link",
+                        "id": "entry-31", "class_name": "mode-choice legal-choice",
+                        "aria_label": "Personne morale",
+                        "href": "/fr/repertoire/personne-morale?session=LEGAL-SESSION",
+                    },
+                ]
+            ),
         }
         iframe_snapshot = {
             "forms": [],
@@ -173,6 +192,13 @@ class BrowserDiagnosticMockTests(unittest.TestCase):
         self.assertIn("FRAMES", diagnostics.report)
         self.assertIn("CONTRÔLES HORS FORMULAIRE", diagnostics.report)
         self.assertIn("ÉLÉMENTS POTENTIELLEMENT CLIQUABLES", diagnostics.report)
+        self.assertIn("Élément cliquable 30", diagnostics.report)
+        self.assertIn("Texte : Personne physique", diagnostics.report)
+        self.assertIn("href : https://sidjilcom.cnrc.dz/fr/repertoire/personne-physique", diagnostics.report)
+        self.assertIn("Class : mode-choice physical-choice", diagnostics.report)
+        self.assertIn("Texte : Personne morale", diagnostics.report)
+        self.assertNotIn("PHYSICAL-TOKEN", diagnostics.report)
+        self.assertNotIn("LEGAL-SESSION", diagnostics.report)
         self.assertIn("SELECTS", diagnostics.report)
         self.assertIn("INPUTS", diagnostics.report)
         self.assertIn("TEXTAREAS", diagnostics.report)
@@ -260,6 +286,18 @@ class DiagnosticDOMFixtureTests(unittest.TestCase):
         self.assertTrue(any(frame.name == "Portail intégré" for frame in bundle.frames))
         self.assertTrue(any(not frame.accessible for frame in bundle.frames if frame.name == "Portail intégré"))
         self.assertEqual(len(bundle.outside_controls), 6)
+        links = {element.element_id: element for element in bundle.clickables}
+        self.assertEqual(links["mode-physical"].text, "Personne physique")
+        self.assertEqual(links["mode-physical"].href, "https://sidjilcom.cnrc.dz/fr/search/physical")
+        self.assertEqual(links["mode-physical"].class_name, "mode-choice physical-choice")
+        self.assertEqual(links["mode-physical"].role, "link")
+        self.assertEqual(links["mode-physical"].data_attributes, (("data-qa", "mode-physical"),))
+        interactive_buttons = {button.element_id: button for button in bundle.buttons}
+        self.assertTrue(interactive_buttons["custom-button"].disabled)
+        self.assertTrue(interactive_buttons["custom-button"].visible)
+        self.assertEqual(interactive_buttons["custom-button"].class_name, "search-mode")
+        self.assertEqual(links["mode-legal"].text, "Personne morale")
+        self.assertEqual(links["mode-legal"].href, "https://sidjilcom.cnrc.dz/fr/search/legal")
 
         report = format_diagnostic(
             SimpleNamespace(title="Fixture", section="Test", url=DEFAULT_SIDJILCOM_URL), bundle
@@ -270,7 +308,7 @@ class DiagnosticDOMFixtureTests(unittest.TestCase):
         for secret in (
             "VALEUR PRIVEE", "918273", "DONNEE EXTERNE PRIVEE", "SECRET INPUT VALUE",
             "NE PAS LIRE", "MOT-DE-PASSE-SECRET", "JETON-CSRF-SECRET", "FRAME-SECRET",
-            "NE-PAS-COPIER", "HIDDEN FIELD VALUE MUST NOT APPEAR",
+            "NE-PAS-COPIER", "HIDDEN FIELD VALUE MUST NOT APPEAR", "PHYSICAL-TOKEN", "LEGAL-SESSION",
         ):
             self.assertNotIn(secret, report)
         self.assertNotIn("access_token=", report)

@@ -49,7 +49,7 @@ La session demeure locale. **Ne partagez pas ce dossier** : il contient l'état 
 
 Les recherches et les journaux restent dans `sidjily.sqlite3` et `logs/` sous le même répertoire de données. Aucun mot de passe Sidjilcom n'est enregistré dans SQLite ou les journaux.
 
-Après ouverture du navigateur, utilisez **Diagnostiquer la page**, **Accueil Sidjilcom**, **Tableau de bord** et **Trouver une entreprise** pour valider la navigation. Le diagnostic structure la page et les frames accessibles, y compris les contrôles hors formulaire, champs natifs et rôles ARIA; il assainit les URL et n'accède jamais aux valeurs des champs. Il ne soumet aucun formulaire et ne modifie aucun critère. Les routes et limites effectivement observées sont décrites dans [docs/sidjilcom-navigation.md](docs/sidjilcom-navigation.md).
+Après ouverture du navigateur, utilisez **Diagnostiquer la page**, **Accueil Sidjilcom**, **Tableau de bord** et **Trouver une entreprise** pour valider la navigation. Le diagnostic structure la page et les frames accessibles, y compris les contrôles hors formulaire, champs natifs, rôles ARIA et éléments interactifs; il affiche leurs libellés visibles et destinations `href` assainies, sans accéder aux valeurs des champs. Il ne soumet aucun formulaire et ne modifie aucun critère. Les routes et limites effectivement observées sont décrites dans [docs/sidjilcom-navigation.md](docs/sidjilcom-navigation.md).
 
 ## Configuration navigateur
 

@@ -28,8 +28,13 @@
          data-qa="custom-combobox"></div>
     <div id="custom-textbox" role="textbox" aria-labelledby="outside-label" contenteditable="true"></div>
     <textarea id="comments" name="comments" aria-label="Commentaire" disabled>NE PAS LIRE</textarea>
-    <div id="custom-button" role="button" aria-label="Valider dossier privé" aria-disabled="true"></div>
+    <div id="custom-button" class="search-mode" role="button" aria-label="Valider dossier privé" aria-disabled="true"></div>
     <a id="details-link" href="/fr/details?token=NE-PAS-GARDER" tabindex="0">Voir détails</a>
+    <a id="mode-physical" class="mode-choice physical-choice" data-qa="mode-physical"
+       aria-label="Personne physique"
+       href="/fr/search/physical?token=PHYSICAL-TOKEN">Personne physique</a>
+    <a id="mode-legal" class="mode-choice legal-choice" aria-label="Personne morale"
+       href="/fr/search/legal?session=LEGAL-SESSION">Personne morale</a>
     <iframe id="embedded-portlet" name="registry-frame" title="Portail intégré"
             src="https://sidjilcom.cnrc.dz/fr/embedded?access_token=FRAME-SECRET"></iframe>
     <input type="password" name="password" value="MOT-DE-PASSE-SECRET">

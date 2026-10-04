@@ -7,6 +7,7 @@ import unicodedata
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any
+from urllib.parse import urljoin, urlsplit
 
 from sidjily.sidjilcom.config import DEFAULT_SIDJILCOM_URL
 from sidjily.sidjilcom.selectors import sanitize_current_url
@@ -53,6 +54,7 @@ class FormFieldDiagnostic:
     visible: bool = True
     frame_name: str = "Document principal"
     frame_url: str = ""
+    class_name: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +83,8 @@ class ButtonDiagnostic:
     frame_name: str = "Document principal"
     frame_url: str = ""
     nature: str = "bouton"
+    class_name: str = ""
+    href: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,6 +267,33 @@ def _frame_context(item: dict[str, Any]) -> tuple[str, str]:
     return name, url
 
 
+def _safe_href(raw_href: object, frame_url: str) -> str:
+    """Keep useful destinations while removing query, fragment, credentials and token-like paths."""
+    href = str(raw_href or "").strip()
+    if not href:
+        return ""
+    path_only = re.split(r"[?#]", href, maxsplit=1)[0]
+    if not path_only:
+        return ""
+    destination = urljoin(frame_url, path_only)
+    safe = sanitize_current_url(destination, DEFAULT_SIDJILCOM_URL)
+    parsed = urlsplit(safe)
+    if _SECRET_WORDS.search(parsed.path) or _EMAIL.search(parsed.path) or _LONG_NUMBER.search(parsed.path) or _JWT.search(parsed.path):
+        return f"{parsed.scheme}://{parsed.netloc}/[chemin masqué]"
+    return safe
+
+
+def _safe_interactive_text(raw_text: object) -> str:
+    """Keep non-sensitive visible labels; trim personalized suffixes from action buttons."""
+    text = _safe_attribute("text", raw_text, 160)
+    if not text:
+        return "Texte masqué (potentiellement sensible)"
+    action = _ACTION_TEXT.search(text)
+    if action and text[action.end():].strip(" .,:;!?-–—»"):
+        return _clean_text(action.group(0), 40)
+    return text
+
+
 def _build_field(item: dict[str, Any]) -> FormFieldDiagnostic | None:
     html_type = _safe_attribute("type", item.get("html_type"), 40).lower()
     name_raw = str(item.get("name", ""))
@@ -298,6 +329,7 @@ def _build_field(item: dict[str, Any]) -> FormFieldDiagnostic | None:
         visible=bool(item.get("visible", True)),
         frame_name=frame_name,
         frame_url=frame_url,
+        class_name=_safe_attribute("class", item.get("class_name"), 160),
     )
 
 
@@ -308,9 +340,7 @@ def _build_buttons(raw_items: object, default_nature: str) -> tuple[ButtonDiagno
     for item in raw_items:
         if not isinstance(item, dict):
             continue
-        text = _safe_attribute("text", item.get("text"), 80)
-        action_match = _ACTION_TEXT.search(text) if text else None
-        text = _clean_text(action_match.group(0), 40) if action_match else "Texte masqué (action non classifiée)"
+        text = _safe_interactive_text(item.get("text"))
         hierarchy = _safe_hierarchy(item.get("hierarchy"))
         form_title = _safe_attribute("form_title", item.get("form_title"), 120)
         if form_title:
@@ -338,6 +368,8 @@ def _build_buttons(raw_items: object, default_nature: str) -> tuple[ButtonDiagno
                 frame_name=frame_name,
                 frame_url=frame_url,
                 nature=_safe_attribute("nature", item.get("nature"), 60) or default_nature,
+                class_name=_safe_attribute("class", item.get("class_name"), 160),
+                href=_safe_href(item.get("href"), frame_url),
             )
         )
     return tuple(buttons)
@@ -354,6 +386,7 @@ def _format_field(field: FormFieldDiagnostic) -> list[str]:
         f"Role : {field.role}",
         f"Name : {field.name or '—'}",
         f"ID : {field.element_id or '—'}",
+        f"Class : {field.class_name or '—'}",
         f"Placeholder : {field.placeholder or '—'}",
         f"aria-label : {field.aria_label or '—'}",
         f"aria-labelledby : {field.aria_labelledby or '—'}",
@@ -374,6 +407,8 @@ def _format_button(button: ButtonDiagnostic) -> list[str]:
         f"Role : {button.role}",
         f"Name : {button.name or '—'}",
         f"ID : {button.element_id or '—'}",
+        f"Class : {button.class_name or '—'}",
+        f"href : {button.href or '—'}",
         f"aria-label : {button.aria_label or '—'}",
         f"aria-labelledby : {button.aria_labelledby or '—'}",
         f"Placeholder : {button.placeholder or '—'}",
@@ -465,7 +500,7 @@ class _FixtureHTMLParser(HTMLParser):
 
     _ALLOWED_ATTRIBUTES = frozenset(
         {
-            "id", "name", "type", "role", "placeholder", "aria-label", "aria-labelledby", "for",
+            "id", "name", "type", "role", "placeholder", "aria-label", "aria-labelledby", "for", "href",
             "title", "disabled", "aria-disabled", "hidden", "checked", "selected", "multiple", "required", "tabindex",
             "contenteditable", "class", "src", "data-testid",
             "data-test", "data-qa", "data-cy", "data-field", "data-field-name", "data-role",
@@ -507,6 +542,8 @@ class _FixtureHTMLParser(HTMLParser):
             "role": safe.get("role", "link" if tag == "a" else "button"),
             "name": safe.get("name", ""),
             "id": safe.get("id", ""),
+            "class_name": safe.get("class", ""),
+            "href": safe.get("href", ""),
             "tag_name": tag,
             "aria_label": safe.get("aria-label", ""),
             "aria_labelledby": safe.get("aria-labelledby", ""),
@@ -579,6 +616,7 @@ class _FixtureHTMLParser(HTMLParser):
                     "role": role or _native_role(tag, html_type),
                     "name": name,
                     "id": element_id,
+                    "class_name": safe.get("class", ""),
                     "tag_name": tag,
                     "aria_label": safe.get("aria-label", ""),
                     "aria_labelledby": safe.get("aria-labelledby", ""),

@@ -66,6 +66,21 @@ DOM_SNAPSHOT_SCRIPT = r"""() => {
         }
         return result;
     };
+    const safeHref = element => {
+        const rawHref = element.getAttribute('href') || '';
+        const pathOnly = rawHref.split(/[?#]/, 1)[0];
+        if (!pathOnly) return '';
+        try {
+            const destination = new URL(pathOnly, window.location.href);
+            if (!['https:', 'http:'].includes(destination.protocol)) return '';
+            if (destination.protocol === 'https:' && destination.hostname.toLowerCase() === 'sidjilcom.cnrc.dz') {
+                return `${destination.protocol}//${destination.hostname}${destination.pathname}`;
+            }
+            return `${destination.protocol}//${destination.host}/[chemin masqué]`;
+        } catch (_error) {
+            return '';
+        }
+    };
     const hierarchy = element => {
         const path = [];
         let current = element;
@@ -140,7 +155,9 @@ DOM_SNAPSHOT_SCRIPT = r"""() => {
             role: role || (element.isContentEditable ? 'textbox' : ''),
             name,
             id: element.id || '',
+            class_name: element.getAttribute('class') || '',
             tag_name: tag,
+            href: safeHref(element),
             aria_label: element.getAttribute('aria-label') || '',
             aria_labelledby: element.getAttribute('aria-labelledby') || '',
             placeholder: element.getAttribute('placeholder') || '',
@@ -160,15 +177,15 @@ DOM_SNAPSHOT_SCRIPT = r"""() => {
         const potentiallyClickable = isButton || tag === 'a' || role === 'link' || role === 'menuitem' ||
             element.hasAttribute('onclick') || (tabIndex !== null && Number(tabIndex) >= 0);
         if (isButton) {
-            buttons.push({...record, text: element.getAttribute('aria-label') ||
-                element.innerText?.trim() || element.getAttribute('title') || '', nature: 'bouton'});
+            buttons.push({...record, text: element.innerText?.trim() ||
+                element.getAttribute('aria-label') || element.getAttribute('title') || '', nature: 'bouton'});
         } else if (tag === 'input' || tag === 'select' || tag === 'textarea' ||
             ['textbox', 'combobox', 'searchbox'].includes(role) || element.isContentEditable) {
             fields.push(record);
         }
         if (potentiallyClickable) {
-            clickables.push({...record, text: element.getAttribute('aria-label') ||
-                element.innerText?.trim() || element.getAttribute('title') || '', nature: 'élément cliquable'});
+            clickables.push({...record, text: element.innerText?.trim() ||
+                element.getAttribute('aria-label') || element.getAttribute('title') || '', nature: 'élément cliquable'});
         }
     }
     return {forms, fields, buttons, clickables};
