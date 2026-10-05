@@ -6,7 +6,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from urllib.parse import urljoin, urlsplit
 
 from sidjily.sidjilcom.autocomplete import (
@@ -25,6 +25,16 @@ from sidjily.sidjilcom.diagnostics import (
     format_search_mode_comparison,
     sanitize_metadata_text,
 )
+from sidjily.sidjilcom.criteria import SearchMode
+from sidjily.sidjilcom.search import (
+    SearchExecutionError,
+    SearchExecutor,
+    SearchNavigationUnexpected,
+    SearchObservation,
+    SearchStep,
+    validate_first_controlled_search,
+)
+from sidjily.sidjilcom.search_playwright import PlaywrightSearchDriver, session_expired_visible
 from sidjily.sidjilcom.selectors import (
     DASHBOARD_ROUTE,
     DEFAULT_ENTERPRISE_SEARCH_ROUTE,
@@ -594,6 +604,15 @@ class BrowserAdapter(Protocol):
 
     def reset_autocomplete_test(self, config: SessionConfig, token: str) -> AutocompleteResetResult: ...
 
+    def execute_search(
+        self,
+        config: SessionConfig,
+        criteria: Any,
+        *,
+        confirmed: bool = False,
+        on_step: Any = None,
+    ) -> SearchObservation: ...
+
     def close(self) -> None: ...
 
 
@@ -646,7 +665,7 @@ class PlaywrightBrowser:
     def inspect(self, config: SessionConfig) -> PageEvidence:
         if self._page is None:
             raise RuntimeError("Navigateur non démarré.")
-        visible_text = self._page.locator("body").inner_text(timeout=5_000)
+        current_url = self._page.url
         has_password_field = self._page.locator('input[type="password"]:visible').count() > 0
         has_visible_form_controls = self._page.locator(
             'input:visible, select:visible, textarea:visible'
@@ -656,8 +675,26 @@ class PlaywrightBrowser:
             'button[aria-label*="déconnexion" i]:visible, a[aria-label*="déconnexion" i]:visible, '
             '[data-testid="user-menu"]:visible'
         ).count() > 0
+        parsed = urlsplit(current_url)
+        if (
+            is_portal_host(current_url, config.url)
+            and parsed.path.rstrip("/") == DEFAULT_ENTERPRISE_SEARCH_ROUTE.rstrip("/")
+        ):
+            # Sur la recherche (y compris sa page de résultats), le polling de session
+            # ne parcourt jamais le texte des lignes d'entreprise.
+            expired = session_expired_visible(self._page)
+            evidence = collect_page_evidence(
+                current_url=current_url,
+                portal_url=config.url,
+                visible_text="",
+                has_password_field=has_password_field,
+                has_signout_control=has_signout_control,
+                has_visible_form_controls=has_visible_form_controls,
+            )
+            return replace(evidence, has_expired_notice=expired)
+        visible_text = self._page.locator("body").inner_text(timeout=5_000)
         return collect_page_evidence(
-            current_url=self._page.url,
+            current_url=current_url,
             portal_url=config.url,
             visible_text=visible_text,
             has_password_field=has_password_field,
@@ -1122,6 +1159,66 @@ class PlaywrightBrowser:
             for field in page.visible_fields
         )
         return replace(legal, visible_fields=visible_fields, report=report)
+
+    def _select_mode_for_search(self, config: SessionConfig, mode: SearchMode) -> None:
+        """Sélectionne uniquement le mode demandé via le lien visible déjà analysé."""
+        if self._page is None or self._page.is_closed():
+            raise SearchExecutionError("Navigateur Sidjilcom indisponible.", code="browser_unavailable")
+        current = urlsplit(self._page.url)
+        if (
+            not is_portal_host(self._page.url, config.url)
+            or current.path.rstrip("/") != DEFAULT_ENTERPRISE_SEARCH_ROUTE.rstrip("/")
+        ):
+            raise SearchExecutionError(
+                "Ouvrez Trouver une entreprise dans le navigateur SIDJILY avant de lancer la recherche.",
+                code="wrong_page",
+            )
+        label = (
+            SEARCH_MODE_LABELS[0]
+            if mode is SearchMode.PERSONNE_PHYSIQUE
+            else SEARCH_MODE_LABELS[1]
+        )
+        candidates = self._discover_search_mode_candidates(config)
+        candidate, _reason = self._choose_search_mode_candidate(candidates.get(label, []))
+        if candidate is None:
+            raise SearchExecutionError(
+                "Le mode demandé est absent ou ambigu; aucune recherche n'a été lancée.",
+                code="mode_unavailable",
+            )
+        try:
+            self._click_mode_candidate(candidate, config)
+            self._wait_for_search_portlet(candidate.frame)
+            if self._page is None or self._page.is_closed():
+                raise SearchNavigationUnexpected()
+            if not is_portal_host(self._page.url, config.url):
+                raise SearchNavigationUnexpected()
+        except SearchExecutionError:
+            raise
+        except SearchModeAnalysisError:
+            raise SearchExecutionError(
+                "Le formulaire du mode demandé n'a pas pu être activé sans ambiguïté.",
+                code="mode_selection_failed",
+            ) from None
+
+    def execute_search(
+        self,
+        config: SessionConfig,
+        criteria: Any,
+        *,
+        confirmed: bool = False,
+        on_step: Callable[[SearchStep], None] | None = None,
+    ) -> SearchObservation:
+        if self._page is None or self._page.is_closed() or self._autocomplete_tester is None:
+            raise SearchExecutionError("Navigateur Sidjilcom indisponible.", code="browser_unavailable")
+        validate_first_controlled_search(criteria)
+        driver = PlaywrightSearchDriver(
+            self._page,
+            config.url,
+            lambda mode: self._select_mode_for_search(config, mode),
+            self._autocomplete_tester,
+            timeout_ms=config.navigation_timeout_ms,
+        )
+        return SearchExecutor(driver).execute(criteria, confirmed=confirmed, on_step=on_step)
 
     def prepare_autocomplete_test(
         self, config: SessionConfig, field_id: str, query: str

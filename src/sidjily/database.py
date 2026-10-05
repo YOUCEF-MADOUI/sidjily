@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def utc_now() -> str:
@@ -67,7 +67,9 @@ class Database:
                             ('pending','running','completed','failed','retry','suspended','cancelled')),
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
-                        last_error TEXT
+                        last_error TEXT,
+                        step TEXT NOT NULL DEFAULT 'created',
+                        result_summary_json TEXT
                     );
                     CREATE TABLE tasks (
                         id TEXT PRIMARY KEY,
@@ -111,9 +113,15 @@ class Database:
                         value_json TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     );
-                    PRAGMA user_version = 1;
+                    PRAGMA user_version = 2;
                     """
                 )
+            elif version == 1:
+                connection.execute(
+                    "ALTER TABLE searches ADD COLUMN step TEXT NOT NULL DEFAULT 'created'"
+                )
+                connection.execute("ALTER TABLE searches ADD COLUMN result_summary_json TEXT")
+                connection.execute("PRAGMA user_version = 2")
 
     @staticmethod
     def add_event(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -95,6 +96,77 @@ class TaskManagerTests(unittest.TestCase):
         manager = TaskManager(Database(":memory:"))
         search = manager.create_search("Mémoire", {"wilaya": "16"})
         self.assertEqual(manager.get_search(search.id).criteria["wilaya"], "16")
+
+    def test_controlled_search_persists_step_state_error_free_summary_and_never_retries(self) -> None:
+        search = self.manager.create_controlled_search(
+            "Test structurel",
+            {"mode": "PERSONNE_MORALE", "commune_wilaya": "34000 : BORDJ BOU ARRERIDJ"},
+        )
+        self.assertEqual(search.step, "prepared")
+        self.assertIsNone(search.result_summary)
+        self.assertIsNone(self.manager.start_next_task(search.id))
+        task = self.manager.start_controlled_search(search.id)
+        self.assertEqual(task.attempts, 1)
+        self.manager.update_controlled_search_step(search.id, "filling_criteria")
+        self.assertEqual(self.manager.get_search(search.id).step, "filling_criteria")
+        self.manager.complete_controlled_search(search.id, {
+            "title": "Résultats",
+            "url": "https://sidjilcom.cnrc.dz/fr/group/sidjilcom/repertoire-des-commercants",
+            "result_count": 4,
+            "table_count": 1,
+            "row_count": 4,
+            "columns": ["Dénomination"],
+            "details_opened": False,
+            "company_rows_collected": False,
+            "automatic_pagination": False,
+        })
+        restored = self.manager.get_search(search.id)
+        self.assertEqual(restored.status, Status.COMPLETED)
+        self.assertEqual(restored.step, "completed")
+        self.assertEqual(restored.result_summary["row_count"], 4)
+        self.assertEqual(self.manager.list_tasks(search.id)[0].result_count, 4)
+        with self.assertRaises(InvalidTransition):
+            self.manager.start_controlled_search(search.id)
+
+    def test_failed_controlled_search_keeps_error_and_cannot_resume(self) -> None:
+        search = self.manager.create_controlled_search("Test", {"mode": "PERSONNE_MORALE"})
+        self.manager.start_controlled_search(search.id)
+        self.manager.update_controlled_search_step(search.id, "form_validation")
+        self.manager.fail_controlled_search(search.id, "Suggestion exacte absente.")
+        restored = self.manager.get_search(search.id)
+        task = self.manager.list_tasks(search.id)[0]
+        self.assertEqual(restored.status, Status.FAILED)
+        self.assertEqual(restored.step, "failed")
+        self.assertEqual(restored.last_error, "Suggestion exacte absente.")
+        self.assertEqual(task.error, "Suggestion exacte absente.")
+        with self.assertRaises(InvalidTransition):
+            self.manager.resume_search(search.id)
+        with self.assertRaises(InvalidTransition):
+            self.manager.start_controlled_search(search.id)
+
+    def test_schema_v1_migration_adds_controlled_search_metadata_without_dropping_rows(self) -> None:
+        legacy_path = Path(self.temp_dir.name) / "legacy.sqlite3"
+        connection = sqlite3.connect(legacy_path)
+        connection.execute(
+            "CREATE TABLE searches (id TEXT PRIMARY KEY, name TEXT NOT NULL, criteria_json TEXT NOT NULL, "
+            "status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_error TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO searches VALUES ('legacy-id', 'Legacy', '{}', 'pending', '2026-01-01', '2026-01-01', NULL)"
+        )
+        connection.execute("PRAGMA user_version = 1")
+        connection.commit()
+        connection.close()
+
+        database = Database(legacy_path)
+        database.initialize()
+        with database.connection() as migrated:
+            columns = {row["name"] for row in migrated.execute("PRAGMA table_info(searches)")}
+            version = migrated.execute("PRAGMA user_version").fetchone()[0]
+            preserved = migrated.execute("SELECT id, step, result_summary_json FROM searches").fetchone()
+        self.assertEqual(version, 2)
+        self.assertTrue({"step", "result_summary_json"}.issubset(columns))
+        self.assertEqual(tuple(preserved), ("legacy-id", "created", None))
 
 
 if __name__ == "__main__":

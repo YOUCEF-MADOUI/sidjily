@@ -24,6 +24,14 @@ from sidjily.sidjilcom.browser import (
 )
 from sidjily.sidjilcom.config import SessionConfig
 from sidjily.sidjilcom.selectors import PageEvidence
+from sidjily.sidjilcom.criteria import SearchCriteria
+from sidjily.sidjilcom.search import (
+    SearchExecutionError,
+    SearchObservation,
+    SearchNotConfirmed,
+    SearchStep,
+    validate_first_controlled_search,
+)
 
 
 class SessionState(str, Enum):
@@ -201,6 +209,27 @@ class SidjilcomSessionManager:
         """Taper une valeur de test et inspecter les suggestions; aucune recherche n'est lancée."""
         return self._submit_operation("autocomplete_prepare", field_id, query, require_connected=True)
 
+    def execute_search(
+        self,
+        criteria: SearchCriteria,
+        *,
+        confirmed: bool,
+        on_step: Any = None,
+    ) -> Future[SearchObservation]:
+        """Exécute une recherche uniquement après confirmation UI explicite."""
+        future: Future[SearchObservation] = Future()
+        if not confirmed:
+            future.set_exception(SearchNotConfirmed())
+            return future
+        try:
+            validate_first_controlled_search(criteria)
+        except SearchExecutionError as exc:
+            future.set_exception(exc)
+            return future
+        return self._submit_operation(
+            "execute_search", criteria, on_step, require_connected=True
+        )
+
     def select_autocomplete_suggestion(
         self, token: str, suggestion_index: int
     ) -> Future[AutocompleteSelectionResult]:
@@ -315,6 +344,17 @@ class SidjilcomSessionManager:
                     command.future.set_result(result)
                 return
 
+            if command.name == "execute_search":
+                if self.snapshot.state != SessionState.CONNECTED:
+                    raise SessionNotConnected()
+                criteria, on_step = command.arguments
+                result = browser.execute_search(
+                    self.config, criteria, confirmed=True, on_step=on_step
+                )
+                if not command.future.done():
+                    command.future.set_result(result)
+                return
+
             if command.name == "home":
                 browser.go_home(self.config)
             elif command.name == "dashboard":
@@ -386,6 +426,11 @@ class SidjilcomSessionManager:
                 state = after_state
             if not command.future.done():
                 command.future.set_result(SessionDiagnostics(state=state, page=page))
+        except SearchExecutionError as exc:
+            if getattr(exc, "code", "") == "session_expired":
+                self._set_state(SessionState.SESSION_EXPIRED)
+            if not command.future.done():
+                command.future.set_exception(exc)
         except SessionOperationError as exc:
             if not command.future.done():
                 command.future.set_exception(exc)

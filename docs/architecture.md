@@ -8,14 +8,18 @@ src/sidjily/
   paths.py               Répertoires locaux utilisateur et profil Chromium dédié
   logging_config.py      Journal de fichier avec rotation
   models.py              Modèles et états des tâches
-  database.py            Connexions SQLite, schéma initial et événements
+  database.py            Connexions SQLite, migrations versionnées et événements
   task_manager.py        Cycle de vie des recherches et tâches persistantes
   sidjilcom/
     config.py             URL officielle, profil et options Chromium
     browser.py            Adaptateur Playwright isolé derrière un protocole
     selectors.py          Indices DOM et classification conservatrice de session
-    session.py             Cycle de vie thread-safe et états publics
-  ui/app.py              Interface Tkinter française, tâches et connexion Sidjilcom
+    criteria.py           Modèles, validation et mapping central des champs
+    autocomplete.py       Cycle d'autocomplétion injectable
+    search.py             Orchestration prudente, confirmation, étapes et diagnostic
+    search_playwright.py  Remplissage DOM et observation structurelle du formulaire
+    session.py            Cycle de vie thread-safe et états publics
+  ui/app.py               Interface Tkinter française, critères, confirmation et session Sidjilcom
 tests/
   test_task_manager.py
   test_sidjilcom_session.py
@@ -32,9 +36,19 @@ tests/
 7. Après une connexion confirmée, un marqueur local vide est créé dans le profil. Il indique uniquement qu'une session avait déjà été établie et permet de distinguer une demande de reconnexion après redémarrage. Le marqueur seul ne confirme jamais une session active.
 8. Les commandes Accueil, Tableau de bord et Trouver une entreprise passent par une file de commandes du thread Playwright. Le tableau de bord/la page métier ne confirment l'accès qu'après vérification du contenu réel; une redirection vers login est rapportée.
 9. Le diagnostic retourne des métadonnées DOM assainies des formulaires et contrôles visibles (jamais leurs valeurs), y compris name/id, sélecteur CSS, contraintes required/readonly, formulaire parent (id/name/action/méthode), portlet et frame, datalist, composants et endpoints déclarés. L'analyse des modes sélectionne uniquement les liens PERSONNES PHYSIQUES/MORALES, attend la stabilisation du portlet et compare les instantanés sans activer les boutons métier ni appeler directement les endpoints.
-10. La fermeture ferme Chromium et conserve le profil local. Une session expirée ne modifie pas SQLite ni les recherches existantes.
+10. La fermeture ferme Chromium et conserve le profil local. Hors recherche contrôlée en cours, une session expirée ne modifie pas les recherches existantes; pendant ce flux, l'étape et l'erreur d'arrêt sont persistées sans relance.
 
 États affichés : `DISCONNECTED`, `CONNECTING`, `WAITING_FOR_LOGIN`, `CONNECTED`, `SESSION_EXPIRED`, `ERROR`; `DISCONNECTING` est un état transitoire de fermeture.
+
+## Première recherche contrôlée
+
+Le préparateur général conserve les dataclasses et le registre `SIDJILCOM_CONTROL_MAP`; il n'existe pas de second catalogue de champs. Le bouton réel est limité par une politique dupliquée côté UI **et** gestionnaire de session à Personne morale + Commune/Wilaya `34000 : BORDJ BOU ARRERIDJ`, sans autre critère. Cette contrainte est volontaire pour le premier test.
+
+La fenêtre est modale : l'utilisateur prépare le récapitulatif, clique explicitement **Lancer la recherche**, puis confirme. Seulement après ce consentement, le thread navigateur sélectionne le lien de mode, re-résout les champs par suffixe observé, refuse tout champ absent/ambigu/prérempli, utilise le `AutocompleteTester` existant et sélectionne une suggestion qui correspond exactement à la valeur confirmée. Il n'existe qu'un seul point de clic sur l'unique bouton visible/enabled **Rechercher** du formulaire identifié. Toute incertitude arrête l'opération; le flux contrôlé n'est ni reprenable ni relançable automatiquement.
+
+Après le clic, le pilote n'expose que titre, URL sans query/fragment, compteur éventuel, nombre de tableaux/lignes, en-têtes, pagination, message d'absence de résultat, alertes et état de session. Le JavaScript de diagnostic ne lit pas les cellules du tableau. Aucun détail d'entreprise, collecte, découpage, pagination ou export n'est présent.
+
+`TaskManager` persiste l'identifiant, le mode/critères, l'état, les dates, l'étape, l'erreur fixe et un résumé structurel optionnel. La migration SQLite version 2 ajoute `searches.step` et `searches.result_summary_json`; les profils, cookies et jetons ne sont jamais enregistrés. Les recherches contrôlées sont bloquées dans les méthodes de reprise/suspension afin d'empêcher un second envoi.
 
 ## Configuration
 
@@ -48,4 +62,4 @@ Le détecteur est volontairement prudent : il s'appuie sur un marqueur de sessio
 
 ## Recherches et schéma SQLite
 
-`TaskManager` persiste les recherches, tâches, événements et progression. La tâche 2 ne change pas le schéma SQLite et n'ajoute pas de moteur de recherche ou d'extraction. `PRAGMA user_version` identifie le schéma; toute évolution future devra ajouter une migration versionnée et ne pas recréer la base existante.
+`TaskManager` persiste les recherches, tâches, événements et progression. `PRAGMA user_version` identifie le schéma; la version 2 ajoute une migration non destructive pour l'étape et le résumé du diagnostic structurel. Toute évolution future devra ajouter une migration versionnée et ne pas recréer la base existante.

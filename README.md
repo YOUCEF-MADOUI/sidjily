@@ -2,7 +2,7 @@
 
 Application de bureau en français pour organiser des recherches sur le portail CNRC/Sidjilcom. Elle fournit une base SQLite, un gestionnaire de tâches persistant et une première intégration de session Sidjilcom manuelle.
 
-La session utilise Playwright/Chromium dans un profil SIDJILY séparé. **L'utilisateur saisit ses identifiants lui-même dans le navigateur visible.** SIDJILY ne lit pas les mots de passe, ne récupère pas le profil Chrome personnel et ne contourne ni authentification, ni CAPTCHA, ni protection anti-bot. Le moteur de recherche et la collecte ne sont pas encore implémentés.
+La session utilise Playwright/Chromium dans un profil SIDJILY séparé. **L'utilisateur saisit ses identifiants lui-même dans le navigateur visible.** SIDJILY ne lit pas les mots de passe, ne récupère pas le profil Chrome personnel et ne contourne ni authentification, ni CAPTCHA, ni protection anti-bot. Une première recherche réelle strictement cadrée est disponible après récapitulatif et confirmation explicite; aucune collecte détaillée, pagination automatique, export ou reprise de recherche n'est implémentée.
 
 ## Prérequis
 
@@ -49,7 +49,17 @@ La session demeure locale. **Ne partagez pas ce dossier** : il contient l'état 
 
 Les recherches et les journaux restent dans `sidjily.sqlite3` et `logs/` sous le même répertoire de données. Aucun mot de passe Sidjilcom n'est enregistré dans SQLite ou les journaux.
 
-Après ouverture du navigateur, utilisez **Diagnostiquer la page**, **Analyser personnes physiques / morales**, **Accueil Sidjilcom**, **Tableau de bord** et **Trouver une entreprise** pour valider la navigation. Le diagnostic inclut les métadonnées structurelles des champs, sélecteurs CSS possibles, contraintes `required`/`readonly`, formulaires/portlet, boutons et composants dynamiques; l'analyse des modes sélectionne uniquement les deux liens de type de personne et compare leurs formulaires. Aucune valeur de champ n'est lue, aucun endpoint n'est appelé manuellement et aucun bouton de recherche n'est activé. Les routes et limites effectivement observées sont décrites dans [docs/sidjilcom-navigation.md](docs/sidjilcom-navigation.md).
+Après ouverture du navigateur, utilisez **Diagnostiquer la page**, **Analyser personnes physiques / morales**, **Accueil Sidjilcom**, **Tableau de bord** et **Trouver une entreprise** pour valider la navigation. Le diagnostic inclut les métadonnées structurelles des champs, sélecteurs CSS possibles, contraintes `required`/`readonly`, formulaires/portlet, boutons et composants dynamiques; l'analyse des modes sélectionne uniquement les deux liens de type de personne et compare leurs formulaires. Ces diagnostics n'activent pas le bouton de recherche. Les routes et limites effectivement observées sont décrites dans [docs/sidjilcom-navigation.md](docs/sidjilcom-navigation.md).
+
+## Première recherche réelle contrôlée
+
+Le bouton **Préparer la première recherche réelle** n'est activé qu'avec une session confirmée. Il présente un récapitulatif et permet de préparer les deux modes et critères facultatifs; toutefois, pour ce premier essai réel, le lancement n'est activé que pour **PERSONNE MORALE**, seul critère **Wilaya = `34000 : BORDJ BOU ARRERIDJ`**. Les autres combinaisons restent locales et ne peuvent pas être soumises. Après **Préparer le récapitulatif**, il faut cliquer sur **Lancer la recherche**, puis confirmer encore une fois. Sans ces actions explicites, le navigateur ne sélectionne aucun mode, ne remplit aucun champ et ne clique pas sur **Rechercher**.
+
+Après confirmation, SIDJILY sélectionne le mode via le lien visible du portail, résout le contrôle avec le mapping central et utilise l'autocomplétion `wilcom` déjà testée. Seule la suggestion exacte est cliquée; si le contrôle, la suggestion, la session, le formulaire ou le bouton est absent ou ambigu, le traitement s'arrête sans nouvelle tentative. Le vrai bouton **Rechercher** du formulaire n'est cliqué qu'une fois. Le rapport conserve titre, URL assainie, compteur éventuel, structure du tableau, nombre de lignes, en-têtes, pagination, absence de résultats et alertes. Les lignes d'entreprise ne sont jamais lues; aucun détail, pagination automatique, subdivision, reprise ou export n'est effectué. La recherche et son étape/état/erreur sont conservés localement; aucun cookie, jeton ou identifiant n'est stocké dans SQLite.
+
+Le bouton **Nouvelle recherche (brouillon)** conserve le préparateur général issu des modèles existants : mode obligatoire et critères facultatifs combinables pour personne physique ou morale. Les listes dont les options ne sont pas confirmées restent désactivées; cette première exécution réelle demeure verrouillée au scénario ci-dessus.
+
+**TEST RÉEL : NON EFFECTUÉ PAR ARENA.** Arena ne possède pas votre session réelle. Pour le réaliser depuis votre PC : ouvrez SIDJILY, cliquez **Ouvrir Sidjilcom**, connectez-vous vous-même dans Chromium si demandé, ouvrez **Trouver une entreprise**, puis cliquez **Préparer la première recherche réelle** et suivez le récapitulatif/confirmation. Consultez ensuite le rapport structurel dans l'application. N'envoyez jamais votre profil navigateur, cookies, mots de passe ni jetons.
 
 ## Configuration navigateur
 
@@ -76,6 +86,6 @@ Les tests de session injectent un navigateur simulé et n'ont besoin ni d'un com
 - SQLite versionnée, journalisation et reprise des tâches interrompues (socle précédent).
 - Session persistante manuelle dans un profil Chromium SIDJILY dédié, avec détection prudente de connexion et d'expiration.
 - Navigation de validation vers l'accueil, le tableau de bord et « Trouver une entreprise »; diagnostic des libellés visibles sans leurs valeurs.
-- Aucune recherche n'est soumise; aucune extraction, subdivision des résultats, export ou IA à ce stade.
+- Premier cycle de recherche réelle cadré par confirmation; diagnostic structurel uniquement, sans détails d'entreprise ni collecte/export.
 
 Voir [docs/architecture.md](docs/architecture.md) et [docs/sidjilcom-navigation.md](docs/sidjilcom-navigation.md) pour les responsabilités, les routes relevées et les limites de validation.

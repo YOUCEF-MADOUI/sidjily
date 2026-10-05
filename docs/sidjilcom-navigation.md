@@ -30,7 +30,19 @@ Le bouton **Tester une autocomplétion** exige une session confirmée et la page
 
 La sélection est une action séparée, limitée à une suggestion visible identifiée par le DOM observé et excluant les liens et boutons. Après cette sélection, l'opération s'arrête et vérifie localement le texte du champ ainsi que l'apparition/disparition de la liste. Le champ de test reste sélectionné jusqu'à **Effacer le champ de test**, action explicite qui le remet à vide. Pour `wilcom`, les contrôles voisins sont comparés structurellement avant/après, sans lire leurs valeurs ni les options d'autres listes. Les tests automatisés de cette abstraction utilisent uniquement un pilote simulé.
 
-Aucun accès à une session Sidjilcom réelle n'a été effectué par l'agent dans cette tâche; la mécanique réelle d'Activité, de Wilaya/Commune et de Nationalité doit encore être confirmée en lançant manuellement ce test sur le portail. Aucune recherche réelle n'a été lancée.
+Aucun accès à une session Sidjilcom réelle n'a été effectué par l'agent dans la Tâche 11; la mécanique réelle d'Activité, de Wilaya/Commune et de Nationalité doit être confirmée manuellement.
+
+## Première recherche contrôlée (Tâche 12)
+
+Le préparateur local continue de réutiliser `SearchCriteria`, `SIDJILCOM_CONTROL_MAP` et `map_criteria_to_controls`. Il accepte un mode obligatoire et des champs facultatifs combinables pour les brouillons physiques/moraux; les options de listes non documentées restent désactivées. L'exécution réelle est pour l'instant limitée au seul scénario imposé : **PERSONNE MORALE**, seul critère **Wilaya = `34000 : BORDJ BOU ARRERIDJ`**.
+
+Sur le PC de l'utilisateur : ouvrir SIDJILY, s'authentifier soi-même dans le Chromium SIDJILY, ouvrir « Trouver une entreprise », cliquer **Préparer la première recherche réelle**, vérifier le récapitulatif puis cliquer **Lancer la recherche** et confirmer la boîte de confirmation. Ce consentement précède la sélection du mode, la saisie, la sélection exacte de la suggestion `wilcom` et l'unique clic sur le véritable bouton **Rechercher**. La liste visible doit contenir la suggestion exacte; sinon, session expirée, formulaire/contrôle/bouton manquant, ambiguïté, timeout ou navigation inattendue arrêtent le flux. Aucun retry, remplissage d'autre critère, réexécution ou clic additionnel n'est effectué.
+
+Après soumission, seules les métadonnées structurelles autorisées sont rapportées : titre, URL nettoyée, compteur affiché si lisible, nombre de tableaux/lignes, intitulés des colonnes, pagination, message aucun résultat et alertes. Le code ne lit pas les cellules ni les détails des entreprises. Il n'y a ni pagination automatique, subdivision, collecte, reprise ou export. Une recherche contrôlée échouée est persistée en échec et le gestionnaire interdit de la reprendre.
+
+Les tests d'exécution restent simulés et ne prouvent pas le comportement du portail en production.
+
+**TEST RÉEL : NON EFFECTUÉ PAR ARENA.** Arena n'a pas de session Sidjilcom utilisateur. L'utilisateur peut effectuer le premier essai depuis son PC en suivant les étapes ci-dessus; il doit garder le profil navigateur local et privé.
 
 ## Validation manuelle avec le compte de l'utilisateur
 
@@ -44,11 +56,11 @@ Aucun accès à une session Sidjilcom réelle n'a été effectué par l'agent da
 8. Cliquer **Trouver une entreprise**. SIDJILY suit le lien sémantique visible, puis utilise la route publique observée en fallback. Une redirection vers la page de connexion est signalée; aucune recherche n'est soumise.
 9. **Accueil Sidjilcom** revient à la racine. Aucun critère n'est rempli et aucune recherche n'est exécutée.
 
-Si la session expire, l'application affiche « Votre session Sidjilcom a expiré. Veuillez vous reconnecter. » La base et les tâches sont inchangées. La fermeture de SIDJILY conserve le profil persistant; le bouton **Déconnecter** ferme Chromium sans supprimer les cookies de ce profil ni exécuter une déconnexion distante.
+Si la session expire pendant la navigation/diagnostic, l'application affiche « Votre session Sidjilcom a expiré. Veuillez vous reconnecter. » sans modifier les recherches existantes. Si elle expire durant la recherche contrôlée, cette recherche est marquée en échec avec l'étape et l'erreur; elle ne sera pas relancée. La fermeture de SIDJILY conserve le profil persistant; le bouton **Déconnecter** ferme Chromium sans supprimer les cookies de ce profil ni exécuter une déconnexion distante.
 
 ## Limites connues
 
 - L'agent n'a pas ouvert de session réelle. Le rapport authentifié ci-dessus a été validé et transmis par l'utilisateur; les détails absents de ce rapport complet restent à confirmer avant d'étendre le mapping.
 - Les sélecteurs de session reposent sur des textes/attributs sémantiques connus et les routes visibles publiquement. Ils sont isolés dans `src/sidjily/sidjilcom/selectors.py` et doivent être ajustés si le portail évolue.
 - Si le portail ne présente pas de marqueur de session reconnu, SIDJILY reste volontairement en attente jusqu'à ce qu'un formulaire protégé accessible confirme l'accès.
-- La tâche ne remplit aucun champ, ne déclenche aucune recherche et ne collecte aucun résultat.
+- Les diagnostics de page/modes n'activent pas Rechercher. Seul le flux Tâche 12, après confirmation explicite, peut soumettre le scénario unique ci-dessus; Arena ne l'a pas exécuté sur Sidjilcom réel.

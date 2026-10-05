@@ -26,6 +26,8 @@ class Search:
     created_at: str
     updated_at: str
     last_error: str | None = None
+    step: str = "created"
+    result_summary: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

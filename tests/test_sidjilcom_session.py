@@ -12,6 +12,8 @@ from unittest.mock import patch
 from sidjily.paths import browser_profile_dir
 from sidjily.sidjilcom.config import DEFAULT_SIDJILCOM_URL, SessionConfig
 from sidjily.sidjilcom.browser import NavigationItem, PageDiagnostics
+from sidjily.sidjilcom.criteria import criteria_from_mapping
+from sidjily.sidjilcom.search import SearchExecutionError, SearchNotConfirmed, SearchObservation
 from sidjily.sidjilcom.selectors import (
     DEFAULT_ENTERPRISE_SEARCH_ROUTE,
     NAVIGATION_LABEL_PATTERNS,
@@ -56,6 +58,7 @@ class FakeBrowser:
         self.autocomplete_prepare_calls = 0
         self.autocomplete_select_calls = 0
         self.autocomplete_reset_calls = 0
+        self.real_search_calls = 0
         self.navigation_evidence = PageEvidence(True, False, False, False, True)
         self.dashboard_evidence = PageEvidence(True, False, False, False, False, True)
         self.page_diagnostics = PageDiagnostics(
@@ -126,6 +129,30 @@ class FakeBrowser:
     def reset_autocomplete_test(self, _config: SessionConfig, _token: str) -> object:
         self.autocomplete_reset_calls += 1
         return "simulated-reset"
+
+    def execute_search(
+        self,
+        _config: SessionConfig,
+        _criteria: object,
+        *,
+        confirmed: bool = False,
+        on_step: object = None,
+    ) -> SearchObservation:
+        self.real_search_calls += 1
+        if not confirmed:
+            raise AssertionError("La session manager doit transmettre la confirmation UI explicite.")
+        return SearchObservation(
+            title="Simulation",
+            sanitized_url=f"https://sidjilcom.cnrc.dz{DEFAULT_ENTERPRISE_SEARCH_ROUTE}",
+            result_count=0,
+            table_count=0,
+            row_count=0,
+            columns=(),
+            pagination_visible=False,
+            no_results=True,
+            errors=(),
+            session_expired=False,
+        )
 
     def close(self) -> None:
         self.closed.set()
@@ -396,6 +423,30 @@ class SessionManagerTests(unittest.TestCase):
             with self.assertRaises(SessionNotConnected):
                 manager.prepare_autocomplete_test("activite", "test").result(timeout=1)
             self.assertEqual(browser.autocomplete_prepare_calls, 0)
+
+    def test_real_search_requires_confirmation_and_first_scenario_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser = FakeBrowser(PageEvidence(True, False, True, False, True))
+            manager = self.make_manager(browser, temp_dir)
+            manager.connect()
+            self.assertTrue(browser.opened.wait(1))
+            self.wait_for_state(manager, SessionState.CONNECTED)
+            criteria = criteria_from_mapping({
+                "mode": "PERSONNE_MORALE",
+                "commune_wilaya": "34000 : BORDJ BOU ARRERIDJ",
+            })
+            with self.assertRaises(SearchNotConfirmed):
+                manager.execute_search(criteria, confirmed=False).result(timeout=1)
+            self.assertEqual(browser.real_search_calls, 0)
+
+            wrong_scope = criteria_from_mapping({"mode": "PERSONNE_PHYSIQUE", "nom": "Test"})
+            with self.assertRaises(SearchExecutionError):
+                manager.execute_search(wrong_scope, confirmed=True).result(timeout=1)
+            self.assertEqual(browser.real_search_calls, 0)
+
+            result = manager.execute_search(criteria, confirmed=True).result(timeout=1)
+            self.assertTrue(result.no_results)
+            self.assertEqual(browser.real_search_calls, 1)
 
     def test_search_mode_analysis_requires_authenticated_search_page_and_never_submits(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
