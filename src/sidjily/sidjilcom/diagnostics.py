@@ -75,6 +75,18 @@ class FormFieldDiagnostic:
     component_type: str = ""
     ajax_endpoint: str = ""
     ajax_method: str = ""
+    container_tag: str = ""
+    container_id: str = ""
+    container_class: str = ""
+    container_role: str = ""
+    container_label: str = ""
+    container_visible: bool = False
+    section_tag: str = ""
+    section_id: str = ""
+    section_class: str = ""
+    section_role: str = ""
+    section_label: str = ""
+    section_visible: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +99,10 @@ class FormDiagnostic:
     name: str = ""
     action: str = ""
     method: str = "GET"
+    class_name: str = ""
+    role: str = ""
+    visible: bool = True
+    css_selector: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +130,7 @@ class ButtonDiagnostic:
     form_method: str = ""
     onclick_present: bool = False
     onclick_handler: str = ""
+    css_selector: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,7 +261,7 @@ def build_form_diagnostics(raw: object) -> FormDiagnosticBundle:
             if not isinstance(item, dict):
                 continue
             frame_name = _safe_attribute("frame_name", item.get("name"), 100) or "Frame"
-            frame_url = sanitize_current_url(str(item.get("url", "")), DEFAULT_SIDJILCOM_URL)
+            frame_url = sanitize_diagnostic_url(item.get("url", ""), DEFAULT_SIDJILCOM_URL)
             frames.append(
                 FrameDiagnostic(
                     name=frame_name,
@@ -258,7 +275,7 @@ def build_form_diagnostics(raw: object) -> FormDiagnosticBundle:
 
     grouped: dict[
         tuple[str, str, str],
-        tuple[str, list[FormFieldDiagnostic], str, str, str, str],
+        tuple[str, list[FormFieldDiagnostic], str, str, str, str, str, str, bool],
     ] = {}
     raw_forms = raw.get("form_entries", [])
     if isinstance(raw_forms, list):
@@ -267,16 +284,19 @@ def build_form_diagnostics(raw: object) -> FormDiagnosticBundle:
                 continue
             frame_name, frame_url = _frame_context(item)
             form_id = _safe_attribute("form_id", item.get("form_id"), 100) or "formulaire-non-identifié"
-            form_title = _safe_attribute("form_title", item.get("form_title"), 120) or "Formulaire"
+            form_title = _safe_form_title(item.get("form_title"))
             grouped.setdefault(
                 (frame_name, frame_url, form_id),
                 (
                     form_title,
                     [],
-                    _safe_attribute("form_id", item.get("form_id"), 100),
+                    _safe_attribute("form_element_id", item.get("form_element_id"), 100),
                     _safe_attribute("form_name", item.get("form_name"), 100),
                     _safe_href(item.get("action"), frame_url),
                     _safe_method(item.get("method")),
+                    _safe_attribute("class", item.get("class_name"), 160),
+                    _safe_attribute("role", item.get("role"), 40),
+                    bool(item.get("visible", True)),
                 ),
             )
 
@@ -294,17 +314,20 @@ def build_form_diagnostics(raw: object) -> FormDiagnosticBundle:
             if not form_id or form_id == "hors-formulaire":
                 outside_controls.append(field)
                 continue
-            form_title = _safe_attribute("form_title", item.get("form_title"), 120) or "Formulaire"
+            form_title = _safe_form_title(item.get("form_title"))
             key = (frame_name, frame_url, form_id)
             grouped.setdefault(
                 key,
                 (
                     form_title,
                     [],
-                    form_id,
+                    _safe_attribute("form_element_id", item.get("form_element_id"), 100),
                     _safe_attribute("form_name", item.get("form_name"), 100),
                     _safe_href(item.get("form_action"), frame_url),
                     _safe_method(item.get("form_method")),
+                    _safe_attribute("form_class_name", item.get("form_class_name"), 160),
+                    _safe_attribute("form_role", item.get("form_role"), 40),
+                    bool(item.get("form_visible", True)),
                 ),
             )[1].append(field)
     forms = tuple(
@@ -317,8 +340,14 @@ def build_form_diagnostics(raw: object) -> FormDiagnosticBundle:
             name=form_name,
             action=action,
             method=method,
+            class_name=class_name,
+            role=form_role,
+            visible=form_visible,
+            css_selector=_css_selector("form", element_id, form_name, form_role),
         )
-        for (frame_name, frame_url, _form_id), (title, fields, element_id, form_name, action, method) in grouped.items()
+        for (frame_name, frame_url, _form_id), (
+            title, fields, element_id, form_name, action, method, class_name, form_role, form_visible
+        ) in grouped.items()
     )
 
     buttons = _build_buttons(raw.get("buttons", []), "bouton")
@@ -332,6 +361,33 @@ def build_form_diagnostics(raw: object) -> FormDiagnosticBundle:
     )
 
 
+def _safe_form_title(raw_title: object) -> str:
+    text = _safe_attribute("form_title", raw_title, 120)
+    if not text:
+        return "Formulaire"
+    known_titles = {
+        "formulaire", "recherche", "recherche commerciale", "recherche principale",
+        "recherche detaillee", "recherche détaillée", "criteres de recherche",
+        "critères de recherche", "personne morale", "personne physique",
+        "rechercher par l'information de la societe",
+        "rechercher par l'information de la société",
+    }
+    return text if _fold(text) in {_fold(title) for title in known_titles} else "Formulaire"
+
+
+def _safe_container_heading(raw_heading: object) -> str:
+    text = _safe_attribute("container_label", raw_heading, 120)
+    if not text:
+        return ""
+    normalized = _fold(text)
+    allowed_contexts = (
+        "rechercher par l'information de la societe",
+        "informations de l'associe",
+        "information de l'associe",
+    )
+    return text if any(fragment in normalized for fragment in allowed_contexts) else ""
+
+
 def _as_int(value: object) -> int:
     try:
         return int(value or 0)
@@ -341,13 +397,22 @@ def _as_int(value: object) -> int:
 
 def _frame_context(item: dict[str, Any]) -> tuple[str, str]:
     name = _safe_attribute("frame_name", item.get("frame_name"), 100) or "Document principal"
-    url = sanitize_current_url(str(item.get("frame_url", "")), DEFAULT_SIDJILCOM_URL)
+    url = sanitize_diagnostic_url(item.get("frame_url", ""), DEFAULT_SIDJILCOM_URL)
     return name, url
 
 
 def _safe_method(raw_method: object) -> str:
     method = str(raw_method or "GET").strip().upper()
     return method if method in {"GET", "POST", "DIALOG"} else "GET (défaut HTML)"
+
+
+def sanitize_diagnostic_url(raw_url: object, portal_url: str = DEFAULT_SIDJILCOM_URL) -> str:
+    """Assainit query/fragment et masque également les chemins ressemblant à un secret."""
+    safe = sanitize_current_url(str(raw_url or ""), portal_url)
+    parsed = urlsplit(safe)
+    if _SECRET_WORDS.search(parsed.path) or _EMAIL.search(parsed.path) or _LONG_NUMBER.search(parsed.path) or _JWT.search(parsed.path):
+        return f"{parsed.scheme}://{parsed.netloc}/[chemin masqué]"
+    return safe
 
 
 def _safe_href(raw_href: object, frame_url: str) -> str:
@@ -359,11 +424,7 @@ def _safe_href(raw_href: object, frame_url: str) -> str:
     if not path_only:
         return ""
     destination = urljoin(frame_url, path_only)
-    safe = sanitize_current_url(destination, DEFAULT_SIDJILCOM_URL)
-    parsed = urlsplit(safe)
-    if _SECRET_WORDS.search(parsed.path) or _EMAIL.search(parsed.path) or _LONG_NUMBER.search(parsed.path) or _JWT.search(parsed.path):
-        return f"{parsed.scheme}://{parsed.netloc}/[chemin masqué]"
-    return safe
+    return sanitize_diagnostic_url(destination, DEFAULT_SIDJILCOM_URL)
 
 
 def _safe_interactive_text(raw_text: object) -> str:
@@ -523,6 +584,22 @@ def _build_field(item: dict[str, Any]) -> FormFieldDiagnostic | None:
         ),
         ajax_endpoint=endpoint,
         ajax_method=endpoint_method,
+        container_tag=_safe_attribute("container_tag", item.get("container", {}).get("tag") if isinstance(item.get("container"), dict) else "", 40),
+        container_id=_safe_attribute("container_id", item.get("container", {}).get("id") if isinstance(item.get("container"), dict) else "", 100),
+        container_class=_safe_attribute("container_class", item.get("container", {}).get("class_name") if isinstance(item.get("container"), dict) else "", 160),
+        container_role=_safe_attribute("container_role", item.get("container", {}).get("role") if isinstance(item.get("container"), dict) else "", 40),
+        container_label=_safe_container_heading(
+            item.get("container", {}).get("heading") if isinstance(item.get("container"), dict) else ""
+        ),
+        container_visible=bool(item.get("container", {}).get("visible", False)) if isinstance(item.get("container"), dict) else False,
+        section_tag=_safe_attribute("section_tag", item.get("section", {}).get("tag") if isinstance(item.get("section"), dict) else "", 40),
+        section_id=_safe_attribute("section_id", item.get("section", {}).get("id") if isinstance(item.get("section"), dict) else "", 100),
+        section_class=_safe_attribute("section_class", item.get("section", {}).get("class_name") if isinstance(item.get("section"), dict) else "", 160),
+        section_role=_safe_attribute("section_role", item.get("section", {}).get("role") if isinstance(item.get("section"), dict) else "", 40),
+        section_label=_safe_container_heading(
+            item.get("section", {}).get("heading") if isinstance(item.get("section"), dict) else ""
+        ),
+        section_visible=bool(item.get("section", {}).get("visible", False)) if isinstance(item.get("section"), dict) else False,
     )
 
 
@@ -535,7 +612,7 @@ def _build_buttons(raw_items: object, default_nature: str) -> tuple[ButtonDiagno
             continue
         text = _safe_interactive_text(item.get("text"))
         hierarchy = _safe_hierarchy(item.get("hierarchy"))
-        form_title = _safe_attribute("form_title", item.get("form_title"), 120)
+        form_title = _safe_form_title(item.get("form_title"))
         if form_title:
             hierarchy = (form_title, *hierarchy)
         frame_name, frame_url = _frame_context(item)
@@ -543,13 +620,16 @@ def _build_buttons(raw_items: object, default_nature: str) -> tuple[ButtonDiagno
         role = _safe_attribute("role", item.get("role"), 40)
         default_type = "link" if tag_name == "a" else "button"
         default_role = "link" if tag_name == "a" else "button"
+        safe_name = _safe_attribute("name", item.get("name"), 100)
+        safe_id = _safe_attribute("id", item.get("id"), 100)
+        safe_role = role or default_role
         buttons.append(
             ButtonDiagnostic(
                 text=text,
                 html_type=_safe_attribute("type", item.get("html_type"), 40) or default_type,
-                role=role or default_role,
-                name=_safe_attribute("name", item.get("name"), 100),
-                element_id=_safe_attribute("id", item.get("id"), 100),
+                role=safe_role,
+                name=safe_name,
+                element_id=safe_id,
                 data_attributes=_safe_data_attributes(item.get("data_attributes"), frame_url),
                 disabled=bool(item.get("disabled", False)),
                 hierarchy=hierarchy,
@@ -568,12 +648,13 @@ def _build_buttons(raw_items: object, default_nature: str) -> tuple[ButtonDiagno
                 form_method=_safe_method(item.get("form_method")) if item.get("form_method") else "",
                 onclick_present=bool(item.get("onclick_present", False)),
                 onclick_handler=_safe_onclick_handler(item.get("onclick_handler")),
+                css_selector=_css_selector(tag_name, safe_id, safe_name, role),
             )
         )
     return tuple(buttons)
 
 
-def _format_field(field: FormFieldDiagnostic) -> list[str]:
+def _format_field(field: FormFieldDiagnostic, *, include_endpoint_metadata: bool = True) -> list[str]:
     options = ", ".join(field.options) if field.options else (
         "textes masqués (potentiellement sensibles)" if field.options_redacted else "—"
     )
@@ -596,32 +677,49 @@ def _format_field(field: FormFieldDiagnostic) -> list[str]:
         f"Disabled : {'oui' if field.disabled else 'non'}",
         f"Visible : {'oui' if field.visible else 'non'}",
         f"Hiérarchie DOM : {' > '.join(field.hierarchy) or '—'}",
-        f"Attributs data-* : {_format_attributes(field.data_attributes)}",
+        f"Conteneur section/fieldset : {field.container_tag or '—'} · ID {field.container_id or '—'} · "
+        f"Class {field.container_class or '—'} · rôle {field.container_role or '—'} · "
+        f"titre {field.container_label or '—'} · visible {'oui' if field.container_visible else 'non'}",
+        f"Section parente : {field.section_tag or '—'} · ID {field.section_id or '—'} · "
+        f"Class {field.section_class or '—'} · rôle {field.section_role or '—'} · "
+        f"titre {field.section_label or '—'} · visible {'oui' if field.section_visible else 'non'}",
+        f"Attributs data-* : {_format_attributes(field.data_attributes, include_endpoint_metadata=include_endpoint_metadata)}",
         f"Composant : {field.component_type or 'non déterminé'}",
-        f"Endpoint déclaré : {field.ajax_endpoint or '—'}",
-        f"Méthode endpoint déclarée : {field.ajax_method or '—'}",
+        f"Endpoint déclaré : {field.ajax_endpoint or '—'}" if include_endpoint_metadata else "Endpoint/API direct : non exposé",
+        f"Méthode endpoint déclarée : {field.ajax_method or '—'}" if include_endpoint_metadata else "Métadonnées de requête réseau : non exposées",
         f"Nombre d'options : {field.option_count}",
         f"Options : {options}",
     ]
 
 
-def _format_button(button: ButtonDiagnostic) -> list[str]:
+def _format_button(
+    button: ButtonDiagnostic,
+    *,
+    include_endpoint_metadata: bool = True,
+    mask_nonstandard_label: bool = False,
+) -> list[str]:
+    safe_text = button.text
+    if mask_nonstandard_label and _fold(button.text) not in {
+        "rechercher", "réinitialiser", "reinitialiser", "effacer", "annuler", "valider"
+    }:
+        safe_text = "Libellé masqué (bouton non recherché)"
     lines = [
         f"Nature : {button.nature}",
         f"Tag / type : {button.tag_name} / {button.html_type}",
-        f"Texte : {button.text}",
+        f"Texte : {safe_text}",
         f"Role : {button.role}",
         f"Name : {button.name or '—'}",
         f"ID : {button.element_id or '—'}",
+        f"Sélecteur CSS : {button.css_selector or '—'}",
         f"Class : {button.class_name or '—'}",
-        f"href : {button.href or '—'}",
+        f"href : {button.href or '—'}" if include_endpoint_metadata else "href/endpoint direct : non exposé",
         f"aria-label : {button.aria_label or '—'}",
         f"aria-labelledby : {button.aria_labelledby or '—'}",
         f"Placeholder : {button.placeholder or '—'}",
         f"Disabled : {'oui' if button.disabled else 'non'}",
         f"Visible : {'oui' if button.visible else 'non'}",
         f"Hiérarchie DOM : {' > '.join(button.hierarchy) or '—'}",
-        f"Attributs data-* : {_format_attributes(button.data_attributes)}",
+        f"Attributs data-* : {_format_attributes(button.data_attributes, include_endpoint_metadata=include_endpoint_metadata)}",
         f"Frame : {button.frame_name}",
     ]
     if button.nature == "bouton" and button.tag_name != "a":
@@ -629,34 +727,44 @@ def _format_button(button: ButtonDiagnostic) -> list[str]:
         lines.extend(
             (
                 f"Formulaire associé : {form_id or '—'}",
-                f"Action du formulaire : {button.form_action or 'implicite (page courante)'}",
+                f"Action du formulaire : {button.form_action or 'implicite (page courante)'}"
+                if include_endpoint_metadata else "Action du formulaire : voir la métadonnée assainie du formulaire",
                 f"Méthode formulaire : {button.form_method or '—'}",
                 f"onclick HTML inline : {'présent' if button.onclick_present else 'absent'}"
-                + (f" · {button.onclick_handler}" if button.onclick_handler else ""),
+                + (f" · {button.onclick_handler}" if button.onclick_handler and include_endpoint_metadata else ""),
             )
         )
     return lines
 
 
-def _format_control_section(title: str, controls: tuple[FormFieldDiagnostic, ...]) -> list[str]:
+def _format_control_section(
+    title: str, controls: tuple[FormFieldDiagnostic, ...], *, include_endpoint_metadata: bool = True
+) -> list[str]:
     lines = ["", title]
     if not controls:
         lines.append("Aucun contrôle correspondant.")
         return lines
     for index, control in enumerate(controls, start=1):
         lines.extend(("", f"Contrôle {index} · {control.frame_name}"))
-        lines.extend(_format_field(control))
+        lines.extend(_format_field(control, include_endpoint_metadata=include_endpoint_metadata))
     return lines
 
 
-def format_diagnostic(page: Any, bundle: FormDiagnosticBundle | None = None) -> str:
+def format_diagnostic(
+    page: Any,
+    bundle: FormDiagnosticBundle | None = None,
+    *,
+    include_endpoint_metadata: bool = True,
+    include_clickables: bool = True,
+    mask_nonstandard_button_labels: bool = False,
+) -> str:
     """Rend un rapport structuré par page, frames et types de contrôles."""
     bundle = bundle or FormDiagnosticBundle((), ())
     lines = [
         "PAGE",
         f"Titre : {sanitize_metadata_text(getattr(page, 'title', ''), 160) or '—'}",
         f"Section : {_clean_text(getattr(page, 'section', ''), 100) or '—'}",
-        f"URL : {sanitize_current_url(str(getattr(page, 'url', '')), DEFAULT_SIDJILCOM_URL)}",
+        f"URL : {sanitize_diagnostic_url(getattr(page, 'url', ''), DEFAULT_SIDJILCOM_URL)}",
         "Confidentialité : aucune valeur de champ, cookie ou jeton collecté.",
         "",
         "FRAMES",
@@ -687,38 +795,60 @@ def format_diagnostic(page: Any, bundle: FormDiagnosticBundle | None = None) -> 
             f"ID : {form.element_id or '—'} · Name : {form.name or '—'} · "
             f"Action : {form.action or 'implicite (page courante)'} · Méthode : {form.method}"
         )
+        lines.append(
+            f"Class : {form.class_name or '—'} · rôle ARIA : {form.role or '—'} · "
+            f"visible : {'oui' if form.visible else 'non'} · sélecteur CSS : {form.css_selector or '—'}"
+        )
         if form.frame_url:
             lines.append(f"URL frame : {form.frame_url}")
         if not form.fields:
             lines.append("Aucun contrôle de formulaire recensé.")
         for field_index, field in enumerate(form.fields, start=1):
             lines.extend(("", f"Contrôle {field_index}"))
-            lines.extend(_format_field(field))
+            lines.extend(_format_field(field, include_endpoint_metadata=include_endpoint_metadata))
 
     lines.extend(("", "CONTRÔLES HORS FORMULAIRE"))
     if not bundle.outside_controls:
         lines.append("Aucun contrôle hors formulaire repéré.")
     for index, field in enumerate(bundle.outside_controls, start=1):
         lines.extend(("", f"Contrôle {index} · {field.frame_name}"))
-        lines.extend(_format_field(field))
+        lines.extend(_format_field(field, include_endpoint_metadata=include_endpoint_metadata))
 
     lines.extend(("", "BOUTONS"))
     if not bundle.buttons:
         lines.append("Aucun bouton repéré.")
     for index, button in enumerate(bundle.buttons, start=1):
         lines.extend(("", f"Bouton {index}"))
-        lines.extend(_format_button(button))
-    lines.append("ÉLÉMENTS POTENTIELLEMENT CLIQUABLES")
-    if not bundle.clickables:
-        lines.append("Aucun élément cliquable supplémentaire repéré.")
-    for index, element in enumerate(bundle.clickables, start=1):
-        lines.extend(("", f"Élément cliquable {index}"))
-        lines.extend(_format_button(element))
+        lines.extend(_format_button(
+            button,
+            include_endpoint_metadata=include_endpoint_metadata,
+            mask_nonstandard_label=mask_nonstandard_button_labels,
+        ))
+    if include_clickables:
+        lines.append("ÉLÉMENTS POTENTIELLEMENT CLIQUABLES")
+        if not bundle.clickables:
+            lines.append("Aucun élément cliquable supplémentaire repéré.")
+        for index, element in enumerate(bundle.clickables, start=1):
+            lines.extend(("", f"Élément cliquable {index}"))
+            lines.extend(_format_button(
+                element,
+                include_endpoint_metadata=include_endpoint_metadata,
+                mask_nonstandard_label=mask_nonstandard_button_labels,
+            ))
 
     all_controls = bundle.all_controls
-    lines.extend(_format_control_section("SELECTS", tuple(c for c in all_controls if c.tag_name == "select" or c.role == "combobox")))
-    lines.extend(_format_control_section("INPUTS", tuple(c for c in all_controls if c.tag_name == "input" or c.role in {"textbox", "searchbox"})))
-    lines.extend(_format_control_section("TEXTAREAS", tuple(c for c in all_controls if c.tag_name == "textarea")))
+    lines.extend(_format_control_section(
+        "SELECTS", tuple(c for c in all_controls if c.tag_name == "select" or c.role == "combobox"),
+        include_endpoint_metadata=include_endpoint_metadata,
+    ))
+    lines.extend(_format_control_section(
+        "INPUTS", tuple(c for c in all_controls if c.tag_name == "input" or c.role in {"textbox", "searchbox"}),
+        include_endpoint_metadata=include_endpoint_metadata,
+    ))
+    lines.extend(_format_control_section(
+        "TEXTAREAS", tuple(c for c in all_controls if c.tag_name == "textarea"),
+        include_endpoint_metadata=include_endpoint_metadata,
+    ))
     return "\n".join(lines)
 
 
@@ -825,7 +955,14 @@ def format_search_mode_comparison(
     return "\n".join(lines)
 
 
-def _format_attributes(attributes: tuple[tuple[str, str], ...]) -> str:
+def _format_attributes(
+    attributes: tuple[tuple[str, str], ...], *, include_endpoint_metadata: bool = True
+) -> str:
+    if not include_endpoint_metadata:
+        attributes = tuple(
+            (key, value) for key, value in attributes
+            if not re.search(r"url|href|endpoint|ajax|api|remote|request", key, re.IGNORECASE)
+        )
     return ", ".join(f"{key}={value}" for key, value in attributes) or "—"
 
 
@@ -852,8 +989,11 @@ class _FixtureHTMLParser(HTMLParser):
         self.form_action = ""
         self.form_method = "GET"
         self.form_name = ""
+        self.form_element_id = ""
+        self.form_class_name = ""
+        self.form_role = ""
         self.form_index = 0
-        self.form_stack: list[tuple[str, str, str, str, str]] = []
+        self.form_stack: list[tuple[str, str, str, str, str, str, str, str]] = []
         self.fieldsets: list[dict[str, str]] = []
         self._active_label: dict[str, Any] | None = None
         self._active_legend: dict[str, Any] | None = None
@@ -903,20 +1043,30 @@ class _FixtureHTMLParser(HTMLParser):
         attr_names = {key for key, _value in attrs}
         role = safe.get("role", "").casefold()
         if tag == "form":
-            self.form_stack.append((self.form_id, self.form_title, self.form_action, self.form_method, self.form_name))
+            self.form_stack.append((
+                self.form_id, self.form_title, self.form_action, self.form_method, self.form_name,
+                self.form_element_id, self.form_class_name, self.form_role,
+            ))
             self.form_index += 1
-            self.form_id = safe.get("id") or f"formulaire-{self.form_index}"
+            self.form_element_id = safe.get("id", "")
+            self.form_id = self.form_element_id or f"formulaire-{self.form_index}"
             self.form_title = safe.get("aria-label") or safe.get("title") or self.form_id or "Formulaire"
             self.form_action = safe.get("action", "")
             self.form_method = safe.get("method", "GET")
             self.form_name = safe.get("name", "")
+            self.form_class_name = safe.get("class", "")
+            self.form_role = safe.get("role", "")
             self.raw["form_entries"].append(
                 {
                     "form_id": self.form_id,
+                    "form_element_id": self.form_element_id,
                     "form_title": self.form_title,
                     "form_name": self.form_name,
                     "action": self.form_action,
                     "method": self.form_method,
+                    "class_name": self.form_class_name,
+                    "role": self.form_role,
+                    "visible": True,
                 }
             )
         elif tag == "iframe":
@@ -982,10 +1132,14 @@ class _FixtureHTMLParser(HTMLParser):
                     "option_count": 0,
                     "options": [],
                     "form_id": self.form_id,
+                    "form_element_id": self.form_element_id,
                     "form_title": self.form_title,
                     "form_name": self.form_name,
                     "form_action": self.form_action,
                     "form_method": self.form_method,
+                    "form_class_name": self.form_class_name,
+                    "form_role": self.form_role,
+                    "form_visible": True,
                     "hierarchy": [item["legend"] for item in self.fieldsets if item["legend"]],
                 }
                 self.raw["fields"].append(field)
@@ -1034,7 +1188,10 @@ class _FixtureHTMLParser(HTMLParser):
             self._active_button = None
             self._active_button_depth = max(0, self._active_button_depth - 1)
         elif tag == "form" and self.form_stack:
-            self.form_id, self.form_title, self.form_action, self.form_method, self.form_name = self.form_stack.pop()
+            (
+                self.form_id, self.form_title, self.form_action, self.form_method, self.form_name,
+                self.form_element_id, self.form_class_name, self.form_role,
+            ) = self.form_stack.pop()
 
     def handle_data(self, data: str) -> None:
         if self._active_label is not None:

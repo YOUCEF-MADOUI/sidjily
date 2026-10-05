@@ -50,6 +50,12 @@ SESSION_LABELS = {
     SessionState.DISCONNECTING: ("🟡 Fermeture en cours", "#946200"),
 }
 
+FORM_DIAGNOSTIC_STAGES = {
+    "Après navigation": "after_navigation",
+    "Après sélection de la Wilaya": "after_wilaya_selection",
+    "Juste avant soumission (sans soumettre)": "before_submission",
+}
+
 
 class SidjilyApp:
     def __init__(
@@ -139,6 +145,23 @@ class SidjilyApp:
             command=self._test_autocomplete,
         )
         self.autocomplete_button.pack(side="left", padx=8)
+        form_diagnostic_controls = ttk.Frame(navigation_panel)
+        form_diagnostic_controls.pack(fill="x", pady=(6, 0))
+        ttk.Label(form_diagnostic_controls, text="Capture à comparer :").pack(side="left")
+        self.form_diagnostic_stage = ttk.Combobox(
+            form_diagnostic_controls,
+            values=tuple(FORM_DIAGNOSTIC_STAGES),
+            state="readonly",
+            width=40,
+        )
+        self.form_diagnostic_stage.set("Après navigation")
+        self.form_diagnostic_stage.pack(side="left", padx=8)
+        self.real_form_diagnostic_button = ttk.Button(
+            form_diagnostic_controls,
+            text="Diagnostiquer le formulaire réel",
+            command=self._diagnose_real_search_form,
+        )
+        self.real_form_diagnostic_button.pack(side="left")
         self.diagnostic_output = ttk.Label(
             navigation_panel,
             text="Aucun diagnostic. Aucune valeur de champ, cookie ou jeton n'est collecté; aucune recherche n'est lancée.",
@@ -353,6 +376,24 @@ class SidjilyApp:
             "Analyse des modes (aucune recherche ne sera soumise)",
         )
 
+    def _diagnose_real_search_form(self) -> None:
+        if self.session_manager.snapshot.state != SessionState.CONNECTED:
+            messagebox.showinfo(
+                "Session requise",
+                "Connectez-vous dans Chromium SIDJILY puis laissez ouverte la page réelle du formulaire personne morale.",
+                parent=self.root,
+            )
+            return
+        stage_label = self.form_diagnostic_stage.get()
+        stage = FORM_DIAGNOSTIC_STAGES.get(stage_label)
+        if not stage:
+            self.diagnostic_output.configure(text="Choisissez une étape de capture valide.")
+            return
+        self._request_session_operation(
+            self.session_manager.diagnose_real_search_form(stage),
+            f"Diagnostic réel en lecture seule — {stage_label} (aucune recherche ne sera lancée)",
+        )
+
     def _test_autocomplete(self) -> None:
         if self.session_manager.snapshot.state != SessionState.CONNECTED:
             messagebox.showinfo(
@@ -439,13 +480,18 @@ class SidjilyApp:
             nav = ", ".join(f"{item.label}: {item.url}" for item in page.navigation_items) or "aucun lien reconnu"
             fields = ", ".join(page.visible_fields[:24]) or "aucun champ visible identifié"
             self._set_diagnostic_report(page.report)
-            self.diagnostic_output.configure(
-                text=(
+            if page.report.startswith("DIAGNOSTIC STRUCTUREL RÉEL"):
+                summary = (
+                    f"État : {state_label} · Capture en lecture seule terminée. "
+                    "Aucune navigation, valeur de champ ni suggestion n'a été affichée ou modifiée."
+                )
+            else:
+                summary = (
                     f"État : {state_label} · "
                     f"Section : {page.section}\nURL : {page.url}\nTitre : {page.title or '—'}\n"
                     f"Navigation reconnue : {nav}\nChamps visibles (libellés uniquement) : {fields}"
                 )
-            )
+            self.diagnostic_output.configure(text=summary)
         self._refresh_session_status()
 
     def _consume_controlled_search(self) -> None:
@@ -531,6 +577,9 @@ class SidjilyApp:
         self.diagnostics_button.configure(state=state)
         self.search_modes_button.configure(state=state)
         self.autocomplete_button.configure(state=state)
+        self.real_form_diagnostic_button.configure(
+            state="normal" if navigation_enabled and snapshot.state == SessionState.CONNECTED else "disabled"
+        )
 
     def _poll_session(self) -> None:
         self._refresh_session_status()

@@ -205,6 +205,10 @@ class SidjilcomSessionManager:
         """Analyser les deux formulaires sans saisir ni soumettre de critères."""
         return self._submit_operation("search_modes")
 
+    def diagnose_real_search_form(self, stage: str) -> Future[SessionDiagnostics]:
+        """Capturer la structure du formulaire courant, strictement en lecture seule."""
+        return self._submit_operation("real_form_diagnostic", stage, require_connected=True)
+
     def prepare_autocomplete_test(self, field_id: str, query: str) -> Future[AutocompleteObservation]:
         """Taper une valeur de test et inspecter les suggestions; aucune recherche n'est lancée."""
         return self._submit_operation("autocomplete_prepare", field_id, query, require_connected=True)
@@ -329,6 +333,21 @@ class SidjilcomSessionManager:
 
     def _execute_command(self, browser: BrowserAdapter, command: _SessionCommand) -> None:
         try:
+            if command.name == "real_form_diagnostic":
+                if self.snapshot.state != SessionState.CONNECTED:
+                    raise SessionNotConnected()
+                page = browser.diagnose_real_search_form(self.config, *command.arguments)
+                evidence = browser.inspect(self.config)
+                state = self._classify_evidence(evidence)
+                self._record_session_state(state)
+                if state == SessionState.SESSION_EXPIRED:
+                    raise SessionExpiredError()
+                if state != SessionState.CONNECTED:
+                    raise SessionNotConnected()
+                if not command.future.done():
+                    command.future.set_result(SessionDiagnostics(state=state, page=page))
+                return
+
             if command.name.startswith("autocomplete_"):
                 if self.snapshot.state != SessionState.CONNECTED:
                     raise SessionNotConnected()

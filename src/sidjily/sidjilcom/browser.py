@@ -35,6 +35,10 @@ from sidjily.sidjilcom.search import (
     validate_first_controlled_search,
 )
 from sidjily.sidjilcom.search_playwright import PlaywrightSearchDriver, session_expired_visible
+from sidjily.sidjilcom.search_form_diagnostics import (
+    format_real_form_report,
+    snapshot_signature,
+)
 from sidjily.sidjilcom.selectors import (
     DASHBOARD_ROUTE,
     DEFAULT_ENTERPRISE_SEARCH_ROUTE,
@@ -387,6 +391,7 @@ DOM_SNAPSHOT_SCRIPT = r"""(options = {}) => {
     const dataAttributes = element => {
         const result = {};
         for (const attribute of Array.from(element.attributes)) {
+            if (options.formOnly && /url|href|endpoint|ajax|api|remote|request/i.test(attribute.name)) continue;
             if (safeDataAttribute.test(attribute.name) && !sensitiveName.test(attribute.name)) {
                 const rawValue = element.getAttribute(attribute.name) || '';
                 const endpointAttribute = /url|href/i.test(attribute.name) ||
@@ -436,6 +441,44 @@ DOM_SNAPSHOT_SCRIPT = r"""(options = {}) => {
         }
         return path;
     };
+    const containerInfo = element => {
+        let container = element.closest('fieldset, section, [role="group"], [role="region"]');
+        if (!container) {
+            for (let current = element.parentElement, depth = 0; current && depth < 7; current = current.parentElement, depth++) {
+                const heading = Array.from(current.children).find(child =>
+                    /^(?:H[1-6]|LEGEND)$/i.test(child.tagName));
+                if (heading) { container = current; break; }
+            }
+        }
+        if (!container) return {tag: '', id: '', class_name: '', role: '', heading: '', visible: false};
+        const heading = container.querySelector('legend, h1, h2, h3, h4, h5, h6');
+        return {
+            tag: container.tagName.toLowerCase(), id: container.id || '',
+            class_name: container.getAttribute('class') || '',
+            role: container.getAttribute('role') || '',
+            heading: heading && visible(heading) ? (heading.innerText || heading.textContent || '').trim() : '',
+            visible: visible(container)
+        };
+    };
+    const sectionInfo = element => {
+        for (let current = element.parentElement, depth = 0; current && depth < 10; current = current.parentElement, depth++) {
+            const semanticSection = current.matches('section, [role="region"]');
+            const directHeading = Array.from(current.children).find(child =>
+                /^(?:H[1-6]|LEGEND)$/i.test(child.tagName));
+            const heading = semanticSection
+                ? current.querySelector('h1, h2, h3, h4, h5, h6, legend')
+                : directHeading;
+            if (!heading || !visible(heading)) continue;
+            return {
+                tag: current.tagName.toLowerCase(), id: current.id || '',
+                class_name: current.getAttribute('class') || '',
+                role: current.getAttribute('role') || '',
+                heading: (heading.innerText || heading.textContent || '').trim(),
+                visible: visible(current)
+            };
+        }
+        return {tag: '', id: '', class_name: '', role: '', heading: '', visible: false};
+    };
     const associatedText = element => {
         const labels = Array.from(element.labels || [])
             .filter(label => scope.contains(label))
@@ -458,17 +501,21 @@ DOM_SNAPSHOT_SCRIPT = r"""(options = {}) => {
     };
     const formInfo = element => {
         const form = element.closest('form') || element.form || null;
-        if (!form) return {id: 'hors-formulaire', title: 'Hors formulaire', name: '', action: '', method: ''};
+        if (!form) return {id: 'hors-formulaire', element_id: '', title: 'Hors formulaire', name: '', action: '', method: '', class_name: '', role: '', visible: false};
         const id = form.id || `formulaire-${query('form').indexOf(form) + 1}`;
         const action = element.getAttribute('formaction') ?? form.getAttribute('action') ?? '';
         const method = element.getAttribute('formmethod') ?? form.getAttribute('method') ?? 'GET';
         return {
             id,
+            element_id: form.id || '',
             title: form.getAttribute('aria-label') || form.getAttribute('title') ||
                 form.querySelector('legend')?.innerText?.trim() || `Formulaire ${id}`,
             name: form.getAttribute('name') || '',
             action: safeDestination(action),
-            method: method.toUpperCase()
+            method: method.toUpperCase(),
+            class_name: form.getAttribute('class') || '',
+            role: form.getAttribute('role') || '',
+            visible: visible(form)
         };
     };
     const mayReadOptionText = label => {
@@ -492,20 +539,27 @@ DOM_SNAPSHOT_SCRIPT = r"""(options = {}) => {
     ];
     const forms = query('form').map((form, index) => ({
         form_id: form.id || `formulaire-${index + 1}`,
+        form_element_id: form.id || '',
         form_title: form.getAttribute('aria-label') || form.getAttribute('title') ||
             form.querySelector('legend')?.innerText?.trim() || `Formulaire ${index + 1}`,
         form_name: form.getAttribute('name') || '',
         action: safeDestination(form.getAttribute('action') || ''),
-        method: (form.getAttribute('method') || 'GET').toUpperCase()
+        method: (form.getAttribute('method') || 'GET').toUpperCase(),
+        class_name: form.getAttribute('class') || '',
+        role: form.getAttribute('role') || '',
+        visible: visible(form)
     }));
     const fields = [];
     const buttons = [];
     const clickables = [];
-    const selector = [
+    const selector = (options.formOnly ? [
+        'input', 'select', 'textarea', 'button', '[role="textbox"]', '[role="combobox"]',
+        '[role="searchbox"]', '[role="button"]', '[contenteditable="true"]'
+    ] : [
         'input', 'select', 'textarea', 'button', '[role="textbox"]', '[role="combobox"]',
         '[role="searchbox"]', '[role="button"]', '[role="link"]', '[role="menuitem"]',
         '[contenteditable="true"]', 'a[href]', '[onclick]', '[tabindex]'
-    ].join(',');
+    ]).join(',');
     for (const element of query(selector)) {
         const tag = element.tagName.toLowerCase();
         const type = (element.getAttribute('type') || (tag === 'input' ? 'text' : tag)).toLowerCase();
@@ -528,7 +582,7 @@ DOM_SNAPSHOT_SCRIPT = r"""(options = {}) => {
             id: element.id || '',
             class_name: element.getAttribute('class') || '',
             tag_name: tag,
-            href: safeHref(element),
+            href: options.formOnly ? '' : safeHref(element),
             aria_label: element.getAttribute('aria-label') || '',
             aria_labelledby: element.getAttribute('aria-labelledby') || '',
             aria_autocomplete: element.getAttribute('aria-autocomplete') || '',
@@ -542,13 +596,19 @@ DOM_SNAPSHOT_SCRIPT = r"""(options = {}) => {
             disabled: !!element.disabled || element.getAttribute('aria-disabled') === 'true',
             visible: visible(element),
             hierarchy: hierarchy(element),
+            container: containerInfo(element),
+            section: sectionInfo(element),
             form_id: form.id,
+            form_element_id: form.element_id,
             form_title: form.title,
             form_name: form.name,
             form_action: form.action,
             form_method: form.method,
+            form_class_name: form.class_name,
+            form_role: form.role,
+            form_visible: form.visible,
             onclick_present: element.hasAttribute('onclick'),
-            onclick_handler: inlineHandlerName(element),
+            onclick_handler: options.formOnly ? '' : inlineHandlerName(element),
             option_count: tag === 'select' ? element.options.length : (dataList?.options.length || 0),
             options: mayReadOptionText(label) && tag === 'select'
                 ? Array.from(element.options).map(option => option.innerText?.trim() || '')
@@ -559,8 +619,9 @@ DOM_SNAPSHOT_SCRIPT = r"""(options = {}) => {
         const isButton = tag === 'button' ||
             (tag === 'input' && ['submit', 'button', 'reset', 'image'].includes(type)) || role === 'button';
         const tabIndex = element.getAttribute('tabindex');
-        const potentiallyClickable = isButton || tag === 'a' || role === 'link' || role === 'menuitem' ||
-            element.hasAttribute('onclick') || (tabIndex !== null && Number(tabIndex) >= 0);
+        const potentiallyClickable = !options.formOnly && (isButton || tag === 'a' || role === 'link' || role === 'menuitem' ||
+            element.hasAttribute('onclick') || (tabIndex !== null && Number(tabIndex) >= 0));
+        if (options.formOnly && isButton && !(element.form || element.closest('form'))) continue;
         if (isButton) {
             buttons.push({...record, text: element.innerText?.trim() ||
                 element.getAttribute('aria-label') || element.getAttribute('title') || '', nature: 'bouton'});
@@ -592,9 +653,13 @@ class BrowserAdapter(Protocol):
 
     def navigate_to_dashboard(self, config: SessionConfig) -> None: ...
 
-    def diagnostics(self, config: SessionConfig, *, portlet_only: bool = False) -> PageDiagnostics: ...
+    def diagnostics(
+        self, config: SessionConfig, *, portlet_only: bool = False, form_only: bool = False
+    ) -> PageDiagnostics: ...
 
     def diagnose_search_modes(self, config: SessionConfig) -> PageDiagnostics: ...
+
+    def diagnose_real_search_form(self, config: SessionConfig, stage: str) -> PageDiagnostics: ...
 
     def prepare_autocomplete_test(self, config: SessionConfig, field_id: str, query: str) -> AutocompleteObservation: ...
 
@@ -624,6 +689,7 @@ class PlaywrightBrowser:
         self._context = None
         self._page = None
         self._autocomplete_tester: AutocompleteTester | None = None
+        self._real_form_snapshots: list[tuple[str, tuple[tuple[str, ...], ...]]] = []
 
     def open(self, config: SessionConfig) -> None:
         # Import paresseux : les tests mockés et les fonctions hors session ne lancent pas Chromium.
@@ -760,24 +826,27 @@ class PlaywrightBrowser:
             raise RuntimeError("La destination n'appartient pas au portail officiel.")
         self._page.goto(target, wait_until="domcontentloaded", timeout=config.navigation_timeout_ms)
 
-    def diagnostics(self, config: SessionConfig, *, portlet_only: bool = False) -> PageDiagnostics:
-        """Inspecte la page ou uniquement le portlet demandé, sans lire/modifier de valeur."""
+    def diagnostics(
+        self, config: SessionConfig, *, portlet_only: bool = False, form_only: bool = False
+    ) -> PageDiagnostics:
+        """Inspecte la page ou le portlet; form_only exclut liens, endpoints/API et contenu hors formulaire."""
         if self._page is None:
             raise RuntimeError("Navigateur non démarré.")
         current_url = self._page.url
         navigation_items: list[NavigationItem] = []
-        for label, pattern in NAVIGATION_LABEL_PATTERNS.items():
-            candidates = self._page.get_by_role("link", name=pattern)
-            for index in range(min(candidates.count(), 3)):
-                href = candidates.nth(index).get_attribute("href")
-                if not href:
-                    continue
-                destination = urljoin(current_url, href)
-                if not is_portal_host(destination, config.url):
-                    continue
-                item = NavigationItem(label, sanitize_current_url(destination, config.url))
-                if item not in navigation_items:
-                    navigation_items.append(item)
+        if not form_only:
+            for label, pattern in NAVIGATION_LABEL_PATTERNS.items():
+                candidates = self._page.get_by_role("link", name=pattern)
+                for index in range(min(candidates.count(), 3)):
+                    href = candidates.nth(index).get_attribute("href")
+                    if not href:
+                        continue
+                    destination = urljoin(current_url, href)
+                    if not is_portal_host(destination, config.url):
+                        continue
+                    item = NavigationItem(label, sanitize_current_url(destination, config.url))
+                    if item not in navigation_items:
+                        navigation_items.append(item)
 
         raw: dict[str, list[dict[str, object]]] = {
             "frames": [], "form_entries": [], "fields": [], "buttons": [], "clickables": []
@@ -792,8 +861,11 @@ class PlaywrightBrowser:
                 frame_name = sanitize_metadata_text(frame.name, 100) or fallback_name
                 frame_url = sanitize_current_url(frame.url, config.url)
                 snapshot = (
-                    frame.evaluate(DOM_SNAPSHOT_SCRIPT, {"portletOnly": True})
-                    if portlet_only else frame.evaluate(DOM_SNAPSHOT_SCRIPT)
+                    frame.evaluate(
+                        DOM_SNAPSHOT_SCRIPT,
+                        {"portletOnly": portlet_only, "formOnly": form_only},
+                    )
+                    if portlet_only or form_only else frame.evaluate(DOM_SNAPSHOT_SCRIPT)
                 )
                 if not isinstance(snapshot, dict):
                     raise TypeError("snapshot DOM indisponible")
@@ -876,6 +948,30 @@ class PlaywrightBrowser:
             portlet_scope_found=portlet_scope_found,
             portlet_scopes=tuple(portlet_scopes),
         )
+
+    def diagnose_real_search_form(self, config: SessionConfig, stage: str) -> PageDiagnostics:
+        """Capture et compare la structure du formulaire actuellement ouvert, sans action DOM."""
+        if self._page is None or self._page.is_closed():
+            raise RuntimeError("La page Chromium SIDJILY n'est pas disponible.")
+        page = self.diagnostics(config, portlet_only=True, form_only=True)
+        if not page.portlet_scope_found:
+            # Repli de lecture seule pour observer un marqueur/portlet changé, sans naviguer.
+            page = replace(
+                self.diagnostics(config, portlet_only=False, form_only=True),
+                portlet_scope_found=False,
+            )
+        driver = PlaywrightSearchDriver(self._page, config.url, lambda _mode: None, self._autocomplete_tester)
+        preflight = driver.diagnose_preflight()
+        signature = snapshot_signature(page.form_diagnostics, preflight)
+        previous = self._real_form_snapshots[-1] if self._real_form_snapshots else None
+        report = format_real_form_report(
+            page, page.form_diagnostics, stage, preflight,
+            previous=(previous[0], previous[1]) if previous else None,
+        )
+        self._real_form_snapshots.append((stage, signature))
+        if len(self._real_form_snapshots) > 20:
+            self._real_form_snapshots = self._real_form_snapshots[-20:]
+        return replace(page, report=report)
 
     def _discover_search_mode_candidates(
         self, config: SessionConfig

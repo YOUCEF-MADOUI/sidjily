@@ -51,6 +51,10 @@ Les recherches et les journaux restent dans `sidjily.sqlite3` et `logs/` sous le
 
 Après ouverture du navigateur, utilisez **Diagnostiquer la page**, **Analyser personnes physiques / morales**, **Accueil Sidjilcom**, **Tableau de bord** et **Trouver une entreprise** pour valider la navigation. Le diagnostic inclut les métadonnées structurelles des champs, sélecteurs CSS possibles, contraintes `required`/`readonly`, formulaires/portlet, boutons et composants dynamiques; l'analyse des modes sélectionne uniquement les deux liens de type de personne et compare leurs formulaires. Ces diagnostics n'activent pas le bouton de recherche. Les routes et limites effectivement observées sont décrites dans [docs/sidjilcom-navigation.md](docs/sidjilcom-navigation.md).
 
+### Diagnostic réel du formulaire personne morale (Tâche 13)
+
+Le bouton **Diagnostiquer le formulaire réel** capture, sur demande explicite, la structure de la page déjà ouverte sans naviguer, remplir, sélectionner une suggestion ni soumettre. Il compare les captures successives et fournit un rapport copiable/sauvegardable sans valeurs de champs, données d'entreprise, cookies, jetons, réponses réseau ou endpoint/API direct. Mode d'emploi PC et limites : [docs/diagnostic-formulaire-reel.md](docs/diagnostic-formulaire-reel.md).
+
 ## Première recherche réelle contrôlée
 
 Le bouton **Préparer la première recherche réelle** n'est activé qu'avec une session confirmée. Il présente un récapitulatif et permet de préparer les deux modes et critères facultatifs; toutefois, pour ce premier essai réel, le lancement n'est activé que pour **PERSONNE MORALE**, seul critère **Wilaya = `34000 : BORDJ BOU ARRERIDJ`**. Les autres combinaisons restent locales et ne peuvent pas être soumises. Après **Préparer le récapitulatif**, il faut cliquer sur **Lancer la recherche**, puis confirmer encore une fois. Sans ces actions explicites, le navigateur ne sélectionne aucun mode, ne remplit aucun champ et ne clique pas sur **Rechercher**.

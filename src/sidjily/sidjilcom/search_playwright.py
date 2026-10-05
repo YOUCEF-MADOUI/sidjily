@@ -26,7 +26,12 @@ from sidjily.sidjilcom.criteria import (
     SIDJILCOM_CONTROL_MAP,
     resolve_control_name,
 )
-from sidjily.sidjilcom.diagnostics import sanitize_metadata_text
+from sidjily.sidjilcom.diagnostics import _css_selector, sanitize_diagnostic_url, sanitize_metadata_text
+from sidjily.sidjilcom.search_form_diagnostics import (
+    PreflightButton,
+    PreflightForm,
+    SearchPreflightSnapshot,
+)
 from sidjily.sidjilcom.search import (
     SearchControl,
     SearchExecutionError,
@@ -306,6 +311,194 @@ class PlaywrightSearchDriver:
             raise
         except Exception:
             raise SearchFormUnsafe() from None
+
+    def diagnose_preflight(self) -> SearchPreflightSnapshot:
+        """Observe les mêmes conditions structurelles que le précontrôle, sans interaction.
+
+        Les champs ne sont interrogés que pour produire un booléen de vacuité; aucun texte
+        ni attribut ``value`` n'est renvoyé, conservé ou journalisé.
+        """
+        expected_suffix = SIDJILCOM_CONTROL_MAP["commune_wilaya"].name_suffix or "_wilcom"
+        route_matches = False
+        visible_form_count = 0
+        global_controls: list[str] = []
+        forms_report: list[PreflightForm] = []
+        incomplete = False
+        if self._page is None or self._page.is_closed():
+            return SearchPreflightSnapshot(
+                False, "page indisponible", expected_suffix, 0, 0, (), (), True
+            )
+        try:
+            route_matches = (
+                is_portal_host(self._page.url, self._portal_url)
+                and urlsplit(self._page.url).path.rstrip("/") == DEFAULT_ENTERPRISE_SEARCH_ROUTE.rstrip("/")
+            )
+        except Exception:
+            incomplete = True
+
+        for frame_index, frame in enumerate(list(self._page.frames)):
+            frame_name = sanitize_metadata_text(frame.name or ("Document principal" if frame_index == 0 else f"Frame {frame_index}"), 80)
+            try:
+                all_named = frame.locator("input[name], select[name], textarea[name]")
+                for control_index in range(min(all_named.count(), 400)):
+                    control = all_named.nth(control_index)
+                    try:
+                        name = control.get_attribute("name") or ""
+                        if not name.casefold().endswith(expected_suffix.casefold()) or not control.is_visible():
+                            continue
+                        tag_name = str(control.evaluate("element => element.tagName.toLowerCase()"))
+                        input_type = (control.get_attribute("type") or tag_name).casefold()
+                        control_id = control.get_attribute("id") or ""
+                        hint = self._diagnostic_control_hint(name, control_id, tag_name, input_type)
+                        global_controls.append(f"{frame_name} · {hint}")
+                    except Exception:
+                        incomplete = True
+            except Exception:
+                incomplete = True
+
+            try:
+                form_locator = frame.locator("form")
+                form_total = min(form_locator.count(), 100)
+            except Exception:
+                incomplete = True
+                continue
+            for form_index in range(form_total):
+                try:
+                    form = form_locator.nth(form_index)
+                    visible_form = bool(form.is_visible())
+                    visible_form_count += int(visible_form)
+                    raw_id = form.get_attribute("id") or ""
+                    raw_name = form.get_attribute("name") or ""
+                    safe_id = sanitize_metadata_text(raw_id, 90)
+                    safe_name = sanitize_metadata_text(raw_name, 90)
+                    identity = safe_id or safe_name
+                    title = f"Formulaire {form_index + 1}"
+                    class_name = sanitize_metadata_text(form.get_attribute("class") or "", 140)
+                    role = sanitize_metadata_text(form.get_attribute("role") or "", 40)
+                    css_selector = _css_selector("form", safe_id, safe_name, role)
+                    method = (form.get_attribute("method") or "GET").strip().upper()
+                    raw_action = (form.get_attribute("action") or self._page.url).strip()
+                    target = urljoin(self._page.url, raw_action)
+                    safe_action = sanitize_diagnostic_url(target, self._portal_url)
+                    action_is_portal = is_portal_host(target, self._portal_url)
+
+                    named = form.locator("input[name], select[name], textarea[name]")
+                    named_count = min(named.count(), 200)
+                    matching_controls: list[str] = []
+                    for control_index in range(named_count):
+                        control = named.nth(control_index)
+                        try:
+                            name = control.get_attribute("name") or ""
+                            if not name or not control.is_visible():
+                                continue
+                            if not name.casefold().endswith(expected_suffix.casefold()):
+                                continue
+                            tag_name = str(control.evaluate("element => element.tagName.toLowerCase()"))
+                            input_type = (control.get_attribute("type") or tag_name).casefold()
+                            matching_controls.append(self._diagnostic_control_hint(
+                                name, control.get_attribute("id") or "", tag_name, input_type
+                            ))
+                        except Exception:
+                            incomplete = True
+
+                    controls = form.locator("input, select, textarea")
+                    visible_controls = 0
+                    nonempty_hints: list[str] = []
+                    for control_index in range(min(controls.count(), 250)):
+                        control = controls.nth(control_index)
+                        try:
+                            tag_name = str(control.evaluate("element => element.tagName.toLowerCase()"))
+                            input_type = (control.get_attribute("type") or ("select-one" if tag_name == "select" else "text")).casefold()
+                            if not self._is_visible_user_control(control, tag_name, input_type):
+                                continue
+                            visible_controls += 1
+                            if not self._is_empty(control, tag_name, input_type):
+                                name = control.get_attribute("name") or ""
+                                control_id = control.get_attribute("id") or ""
+                                nonempty_hints.append(self._diagnostic_control_hint(name, control_id, tag_name, input_type))
+                        except Exception:
+                            incomplete = True
+                            # En cas de lecture incertaine, signaler seulement un booléen non vide.
+                            nonempty_hints.append("état de contrôle non déterminé")
+
+                    search_buttons: list[PreflightButton] = []
+                    reset_buttons: list[PreflightButton] = []
+                    button_locator = form.locator("button, input[type='submit'], input[type='button'], input[type='reset']")
+                    for button_index in range(min(button_locator.count(), 50)):
+                        button = button_locator.nth(button_index)
+                        try:
+                            tag_name = str(button.evaluate("element => element.tagName.toLowerCase()"))
+                            label = (
+                                button.get_attribute("value") or ""
+                                if tag_name == "input" else button.inner_text(timeout=1_000)
+                            )
+                            normalized = re.sub(r"\s+", " ", str(label)).strip().casefold()
+                            visible = bool(button.is_visible())
+                            enabled = bool(button.is_enabled())
+                            button_id = sanitize_metadata_text(button.get_attribute("id") or "", 90)
+                            button_name = sanitize_metadata_text(button.get_attribute("name") or "", 90)
+                            button_role = sanitize_metadata_text(button.get_attribute("role") or "", 40)
+                            selector = f"{css_selector} {_css_selector(tag_name, button_id, button_name, button_role)}"
+                            observed = PreflightButton(
+                                text=sanitize_metadata_text(label, 60),
+                                visible=visible,
+                                enabled=enabled,
+                                associated=True,
+                                selector=selector,
+                            )
+                            if normalized == "rechercher":
+                                search_buttons.append(observed)
+                            if normalized.startswith("réinitialiser") or normalized.startswith("reinitialiser"):
+                                reset_buttons.append(observed)
+                        except Exception:
+                            incomplete = True
+
+                    forms_report.append(PreflightForm(
+                        frame_name=frame_name,
+                        form_id=safe_id or identity,
+                        form_name=safe_name,
+                        title=title,
+                        action=safe_action,
+                        method=sanitize_metadata_text(method, 16) or "inconnue",
+                        class_name=class_name,
+                        role=role,
+                        visible=visible_form,
+                        css_selector=css_selector,
+                        expected_control_count=len(matching_controls),
+                        expected_controls=tuple(matching_controls),
+                        visible_control_count=visible_controls,
+                        nonempty_control_count=len(nonempty_hints),
+                        nonempty_controls=tuple(nonempty_hints),
+                        search_buttons=tuple(search_buttons),
+                        reset_buttons=tuple(reset_buttons),
+                        action_is_portal=action_is_portal,
+                    ))
+                except Exception:
+                    incomplete = True
+
+        return SearchPreflightSnapshot(
+            route_matches=route_matches,
+            page_section=identify_section(self._page.url),
+            expected_suffix=expected_suffix,
+            visible_form_count=visible_form_count,
+            global_expected_control_count=len(global_controls),
+            global_expected_controls=tuple(global_controls[:30]),
+            forms=tuple(forms_report),
+            inspection_incomplete=incomplete,
+        )
+
+    @staticmethod
+    def _diagnostic_control_hint(name: str, element_id: str, tag_name: str, input_type: str) -> str:
+        """Identifiant structurel autorisé; jamais le contenu d'un contrôle."""
+        if input_type == "password" or re.search(r"password|passwd|token|secret|csrf|cookie|session|credential|authorization", name + " " + element_id, re.I):
+            return f"{tag_name}/{input_type} · identifiant masqué"
+        safe_name = sanitize_metadata_text(name, 90)
+        safe_id = sanitize_metadata_text(element_id, 90)
+        return " · ".join(part for part in (
+            f"{tag_name}/{input_type}",
+            f"name={safe_name}" if safe_name else "",
+            f"id={safe_id}" if safe_id else "",
+        ) if part)
 
     @staticmethod
     def _is_visible_user_control(locator: Any, tag_name: str, input_type: str) -> bool:
