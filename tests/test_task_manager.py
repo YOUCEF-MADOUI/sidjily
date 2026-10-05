@@ -97,6 +97,45 @@ class TaskManagerTests(unittest.TestCase):
         search = manager.create_search("Mémoire", {"wilaya": "16"})
         self.assertEqual(manager.get_search(search.id).criteria["wilaya"], "16")
 
+    def test_preparatory_draft_restores_criteria_summary_created_date_and_pending_state(self) -> None:
+        criteria = {
+            "mode": "PERSONNE_MORALE",
+            "raison_sociale": "Atlas Conseil",
+            "commune_wilaya": "Sétif",
+        }
+        summary = {
+            "kind": "sidjily_preparation_draft",
+            "mode": "PERSONNE_MORALE",
+            "filled_criteria": 2,
+            "summary": "Aucune recherche n'a encore été envoyée à Sidjilcom.",
+            "submitted": False,
+        }
+        created = self.manager.create_draft("Brouillon Atlas", criteria, summary)
+        restarted = TaskManager(Database(self.database_path))
+        restored = restarted.get_search(created.id)
+
+        self.assertTrue(restarted.is_draft(created.id))
+        self.assertEqual(restored.criteria, criteria)
+        self.assertEqual(restored.result_summary, summary)
+        self.assertEqual(restored.created_at, created.created_at)
+        self.assertEqual(restored.status, Status.PENDING)
+        self.assertEqual(restored.step, "draft")
+        self.assertEqual(restarted.list_drafts()[0].id, created.id)
+        self.assertIsNone(restarted.start_next_task(created.id))
+        with self.assertRaises(InvalidTransition):
+            restarted.resume_search(created.id)
+
+        updated = restarted.update_draft(
+            created.id,
+            "Brouillon Atlas modifié",
+            {**criteria, "activite": "Conseil"},
+            {**summary, "filled_criteria": 3},
+        )
+        self.assertEqual(updated.created_at, created.created_at)
+        self.assertEqual(updated.criteria["activite"], "Conseil")
+        self.assertEqual(updated.result_summary["filled_criteria"], 3)
+        self.assertEqual(updated.status, Status.PENDING)
+
     def test_controlled_search_persists_step_state_error_free_summary_and_never_retries(self) -> None:
         search = self.manager.create_controlled_search(
             "Test structurel",

@@ -26,6 +26,71 @@ class TaskManager:
     def create_search(self, name: str, criteria: dict[str, Any]) -> Search:
         return self._create_search(name, criteria, task_type="search", step="created")
 
+    def create_draft(
+        self, name: str, criteria: dict[str, Any], summary: dict[str, Any]
+    ) -> Search:
+        """Persiste un brouillon local sans tâche exécutable ni interaction navigateur."""
+        return self._create_search(
+            name, criteria, task_type="sidjily_search_draft", step="draft",
+            result_summary=summary,
+        )
+
+    def update_draft(
+        self, search_id: str, name: str, criteria: dict[str, Any], summary: dict[str, Any]
+    ) -> Search:
+        """Met à jour un brouillon SIDJILY sans le faire progresser vers une soumission."""
+        now = utc_now()
+        with self.database.connection(immediate=True) as connection:
+            task = connection.execute(
+                "SELECT id, status FROM tasks WHERE search_id = ? AND task_type = 'sidjily_search_draft'",
+                (search_id,),
+            ).fetchone()
+            if task is None:
+                raise KeyError(f"Brouillon introuvable : {search_id}")
+            if task["status"] != Status.PENDING:
+                raise InvalidTransition("Seul un brouillon en attente peut être modifié.")
+            connection.execute(
+                "UPDATE searches SET name = ?, criteria_json = ?, result_summary_json = ?, "
+                "updated_at = ?, step = 'draft' WHERE id = ?",
+                (
+                    name.strip() or "Recherche sans titre",
+                    self.database.encode_json(criteria),
+                    self.database.encode_json(summary),
+                    now,
+                    search_id,
+                ),
+            )
+            connection.execute(
+                "UPDATE tasks SET criteria_json = ?, updated_at = ? WHERE id = ?",
+                (self.database.encode_json(criteria), now, task["id"]),
+            )
+            self.database.add_event(
+                connection,
+                "Brouillon de recherche SIDJILY mis à jour; aucune recherche Sidjilcom envoyée.",
+                search_id=search_id,
+                task_id=task["id"],
+            )
+        return self.get_search(search_id)
+
+    def list_drafts(self, limit: int = 100) -> list[Search]:
+        """Retourne les brouillons préparatoires, du plus récent au plus ancien."""
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                "SELECT s.* FROM searches AS s JOIN tasks AS t ON t.search_id = s.id "
+                "WHERE t.task_type = 'sidjily_search_draft' AND t.parent_id IS NULL "
+                "ORDER BY s.created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._search_from_row(row) for row in rows]
+
+    def is_draft(self, search_id: str) -> bool:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM tasks WHERE search_id = ? AND task_type = 'sidjily_search_draft' LIMIT 1",
+                (search_id,),
+            ).fetchone()
+        return row is not None
+
     def create_controlled_search(self, name: str, criteria: dict[str, Any]) -> Search:
         """Crée une recherche réelle réservée au flux confirmé, sans chemin de reprise."""
         return self._create_search(
@@ -33,17 +98,19 @@ class TaskManager:
         )
 
     def _create_search(
-        self, name: str, criteria: dict[str, Any], *, task_type: str, step: str
+        self, name: str, criteria: dict[str, Any], *, task_type: str, step: str,
+        result_summary: dict[str, Any] | None = None,
     ) -> Search:
         search_id, task_id = str(uuid.uuid4()), str(uuid.uuid4())
         now = utc_now()
         with self.database.connection(immediate=True) as connection:
             connection.execute(
-                "INSERT INTO searches(id, name, criteria_json, status, created_at, updated_at, step) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO searches(id, name, criteria_json, status, created_at, updated_at, step, result_summary_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     search_id, name.strip() or "Recherche sans titre",
                     self.database.encode_json(criteria), Status.PENDING, now, now, step,
+                    self.database.encode_json(result_summary) if result_summary is not None else None,
                 ),
             )
             connection.execute(
@@ -54,6 +121,8 @@ class TaskManager:
             message = (
                 "Recherche Sidjilcom contrôlée créée; étape préparée, aucune recherche soumise."
                 if task_type == "sidjilcom_controlled_search"
+                else "Brouillon SIDJILY créé; aucune requête Sidjilcom envoyée."
+                if task_type == "sidjily_search_draft"
                 else "Recherche créée et mise en attente."
             )
             self.database.add_event(connection, message, search_id=search_id, task_id=task_id)
@@ -200,7 +269,8 @@ class TaskManager:
         now = utc_now()
         with self.database.connection(immediate=True) as connection:
             row = connection.execute(
-                "SELECT * FROM tasks WHERE search_id = ? AND task_type != 'sidjilcom_controlled_search' "
+                "SELECT * FROM tasks WHERE search_id = ? AND task_type NOT IN "
+                "('sidjilcom_controlled_search', 'sidjily_search_draft') "
                 "AND status IN (?, ?) ORDER BY created_at, rowid LIMIT 1",
                 (search_id, Status.PENDING, Status.RETRY),
             ).fetchone()
@@ -226,8 +296,8 @@ class TaskManager:
             raise ValueError("Le nombre de résultats ne peut pas être négatif.")
         with self.database.connection(immediate=True) as connection:
             task = self._require_task(connection, task_id)
-            if task["task_type"] == "sidjilcom_controlled_search":
-                raise InvalidTransition("Utilisez le cycle spécialisé de recherche contrôlée.")
+            if task["task_type"] in {"sidjilcom_controlled_search", "sidjily_search_draft"}:
+                raise InvalidTransition("Utilisez le cycle spécialisé correspondant à ce type de tâche.")
             if task["status"] != Status.RUNNING:
                 raise InvalidTransition("Seule une tâche en cours peut être terminée.")
             now = utc_now()
@@ -244,8 +314,8 @@ class TaskManager:
     def fail_task(self, task_id: str, error: str) -> None:
         with self.database.connection(immediate=True) as connection:
             task = self._require_task(connection, task_id)
-            if task["task_type"] == "sidjilcom_controlled_search":
-                raise InvalidTransition("Utilisez le cycle spécialisé de recherche contrôlée.")
+            if task["task_type"] in {"sidjilcom_controlled_search", "sidjily_search_draft"}:
+                raise InvalidTransition("Utilisez le cycle spécialisé correspondant à ce type de tâche.")
             if task["status"] != Status.RUNNING:
                 raise InvalidTransition("Seule une tâche en cours peut échouer.")
             now = utc_now()
@@ -310,6 +380,12 @@ class TaskManager:
             ).fetchone()
             if controlled:
                 raise InvalidTransition("Une recherche réelle contrôlée ne peut pas être suspendue ou relancée.")
+            draft = connection.execute(
+                "SELECT 1 FROM tasks WHERE search_id = ? AND task_type = 'sidjily_search_draft'",
+                (search_id,),
+            ).fetchone()
+            if draft:
+                raise InvalidTransition("Un brouillon se modifie depuis le parcours de préparation.")
             if search["status"] not in (Status.PENDING, Status.RUNNING, Status.RETRY):
                 raise InvalidTransition("Cette recherche ne peut pas être suspendue dans son état actuel.")
             now = utc_now()
@@ -334,6 +410,12 @@ class TaskManager:
             ).fetchone()
             if controlled:
                 raise InvalidTransition("Une recherche réelle contrôlée ne peut pas être relancée automatiquement.")
+            draft = connection.execute(
+                "SELECT 1 FROM tasks WHERE search_id = ? AND task_type = 'sidjily_search_draft'",
+                (search_id,),
+            ).fetchone()
+            if draft:
+                raise InvalidTransition("Un brouillon se restaure depuis le parcours de préparation.")
             if search["status"] not in (Status.SUSPENDED, Status.FAILED, Status.RETRY):
                 raise InvalidTransition("Seules les recherches suspendues ou en échec peuvent reprendre.")
             now = utc_now()
