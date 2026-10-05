@@ -59,6 +59,20 @@ SESSION_LABELS = {
     SessionState.DISCONNECTING: ("🟡 Fermeture en cours", "#946200"),
 }
 
+CONTROLLED_STEP_LABELS = {
+    "prepared": "Préparée",
+    "mode_selection": "Sélection du mode",
+    "form_validation": "Validation du formulaire",
+    "filling_criteria": "Saisie des critères",
+    "submitting": "Soumission en cours — résultat potentiellement inconnu",
+    "submitted": "Soumise — observation en cours",
+    "observing_results": "Observation des résultats",
+    "results_detected": "Résultats détectés",
+    "no_results": "Aucun résultat",
+    "result_unknown": "Résultat inconnu — ne pas relancer",
+    "failed": "Échec avant soumission",
+}
+
 FORM_DIAGNOSTIC_STAGES = {
     "Après navigation": "after_navigation",
     "Après sélection de la Wilaya": "after_wilaya_selection",
@@ -79,6 +93,7 @@ class SidjilyApp:
         self._pending_session_operation: Any = None
         self._pending_search_operation: Any = None
         self._pending_search_id: str | None = None
+        self._pending_result_diagnostic_id: str | None = None
         self._pending_preparation_requested = False
         self._pending_preparation_draft: Search | None = None
         self._pending_navigation_action = ""
@@ -98,7 +113,7 @@ class SidjilyApp:
         ttk.Label(container, text="SIDJILY", font=("Segoe UI", 22, "bold")).pack(anchor="w")
         ttk.Label(
             container,
-            text="Préparez et enregistrez vos critères localement. Aucune recherche ne sera envoyée pendant cette étape.",
+            text="Préparez vos critères localement. Une recherche réelle ne part qu'après confirmation explicite dans SIDJILY.",
             wraplength=880,
         ).pack(anchor="w", pady=(2, 12))
 
@@ -154,7 +169,7 @@ class SidjilyApp:
         self.continue_button.pack(side="left")
         ttk.Label(
             search_panel,
-            text="La préparation, l'aperçu et l'enregistrement sont locaux; ils ne cliquent jamais sur Rechercher.",
+            text="L'aperçu et l'enregistrement sont locaux. Le lancement réel est limité au premier test strictement validé et confirmé.",
             foreground="#555555",
         ).pack(anchor="w", pady=(7, 0))
 
@@ -230,6 +245,12 @@ class SidjilyApp:
             command=self._test_autocomplete,
         )
         self.autocomplete_button.pack(side="left", padx=8)
+        self.result_observation_button = ttk.Button(
+            navigation_buttons,
+            text="Diagnostiquer le résultat (lecture seule)",
+            command=self._diagnose_current_search_results,
+        )
+        self.result_observation_button.pack(side="left", padx=8)
 
         form_diagnostic_controls = ttk.Frame(parent)
         form_diagnostic_controls.pack(fill="x", pady=(7, 0))
@@ -338,6 +359,9 @@ class SidjilyApp:
             if dialog.result is None:
                 return
             name, criteria = dialog.result
+            if dialog.launch_confirmed:
+                self._start_confirmed_controlled_search(name, criteria, draft_id=dialog.draft_id)
+                return
             criteria_mapping = criteria_to_mapping(criteria)
             summary = draft_summary_record(criteria)
             if dialog.draft_id:
@@ -358,10 +382,26 @@ class SidjilyApp:
             )
 
     def new_real_search(self) -> None:
-        if self.session_manager.snapshot.state != SessionState.CONNECTED:
+        """Parcours réel de compatibilité; reste soumis au même dialogue de confirmation."""
+        if self._pending_search_id is not None or (
+            self._pending_search_operation is not None and not self._pending_search_operation.done()
+        ):
+            messagebox.showinfo("Recherche en cours", "Une recherche contrôlée est déjà en cours.", parent=self.root)
+            return
+        dialog = _NewSearchDialog(self.root, launch_mode=True)
+        self.root.wait_window(dialog.window)
+        if dialog.result is not None and dialog.launch_confirmed:
+            name, criteria = dialog.result
+            self._start_confirmed_controlled_search(name, criteria, draft_id=dialog.draft_id)
+
+    def _start_confirmed_controlled_search(
+        self, name: str, criteria: SearchCriteria, *, draft_id: str | None = None
+    ) -> None:
+        if self.session_manager.snapshot.state != SessionState.CONNECTED or not self.session_manager.is_running:
             messagebox.showinfo(
                 "Session requise",
-                "Connectez-vous manuellement dans le navigateur SIDJILY, puis ouvrez « Trouver une entreprise ».",
+                "Connectez-vous manuellement dans Chromium SIDJILY et ouvrez « Trouver une entreprise ». "
+                "La confirmation n'a pas déclenché de soumission.",
                 parent=self.root,
             )
             return
@@ -370,28 +410,32 @@ class SidjilyApp:
         ):
             messagebox.showinfo("Recherche en cours", "Une recherche contrôlée est déjà en cours.", parent=self.root)
             return
-        dialog = _NewSearchDialog(self.root, launch_mode=True)
-        self.root.wait_window(dialog.window)
-        if dialog.result is None:
-            return
-        name, criteria = dialog.result
         try:
             validate_first_controlled_search(criteria)
-            search = self.manager.create_controlled_search(name, criteria_to_mapping(criteria))
+            mapping = criteria_to_mapping(criteria)
+            search = (
+                self.manager.promote_draft_to_controlled_search(draft_id, name, mapping)
+                if draft_id else self.manager.create_controlled_search(name, mapping)
+            )
             self.manager.start_controlled_search(search.id, step="mode_selection")
             future = self.session_manager.execute_search(
                 criteria,
                 confirmed=True,
                 on_step=lambda step: self.manager.update_controlled_search_step(search.id, step),
+                on_pre_submit=lambda diagnostic: self.manager.update_controlled_search_pre_submit_diagnostic(
+                    search.id, diagnostic
+                ),
             )
         except (ValueError, SessionOperationError, SearchExecutionError) as exc:
             messagebox.showerror("Recherche non lancée", str(exc), parent=self.root)
             return
+        self.selected_search_id = search.id
         self._pending_search_id = search.id
         self._pending_search_operation = future
         self.footer.configure(
-            text="Recherche contrôlée en cours. Un seul clic Rechercher est autorisé; aucune collecte ni pagination automatique."
+            text="Recherche contrôlée en cours. Un seul clic Rechercher est autorisé; aucun détail, collecte, pagination automatique ou export."
         )
+        self.refresh()
         self._refresh_session_status()
 
     def resume_selected(self) -> None:
@@ -448,12 +492,15 @@ class SidjilyApp:
                 )
             )
             return
+        step = CONTROLLED_STEP_LABELS.get(search.step, search.step)
         events = self.manager.list_events(search_id, limit=4)
-        if not events:
-            self.details.configure(text="Aucun événement enregistré pour cette recherche.")
-            return
         recent = "   •   ".join(f"{event['created_at'][11:19]} {event['message']}" for event in events[-3:])
-        self.details.configure(text=f"Journal récent : {recent}")
+        self.details.configure(
+            text=(
+                f"Recherche contrôlée · état : {search.status.value} · étape : {step} · créée le {search.created_at}\n"
+                f"{recent or 'Aucun événement enregistré.'}"
+            )
+        )
 
     @staticmethod
     def _format_criteria(criteria: dict[str, Any]) -> str:
@@ -498,6 +545,31 @@ class SidjilyApp:
         self._request_session_operation(
             self.session_manager.diagnose_search_modes(),
             "Analyse des modes (aucune recherche ne sera soumise)",
+        )
+
+    def _diagnose_current_search_results(self) -> None:
+        search = self._selected_search(required=False)
+        if search is None or search.step != "result_unknown":
+            messagebox.showinfo(
+                "Résultat non marqué comme inconnu",
+                "Sélectionnez une recherche contrôlée dont l'étape est « result_unknown ». "
+                "Ce diagnostic ne lance jamais de recherche.",
+                parent=self.root,
+            )
+            return
+        if self.session_manager.snapshot.state != SessionState.CONNECTED:
+            messagebox.showinfo(
+                "Session requise",
+                "Reconnectez-vous manuellement et laissez ouverte la page Sidjilcom à diagnostiquer. "
+                "Cette action est une lecture structurelle, sans nouvelle soumission.",
+                parent=self.root,
+            )
+            return
+        self._pending_result_diagnostic_id = search.id
+        self._pending_navigation_action = "result_diagnostic"
+        self._request_session_operation(
+            self.session_manager.diagnose_search_results(),
+            "Diagnostic structurel du résultat en lecture seule",
         )
 
     def _diagnose_real_search_form(self) -> None:
@@ -592,6 +664,8 @@ class SidjilyApp:
             result = future.result()
         except SessionOperationError as exc:
             message = str(exc)
+            if navigation_action == "result_diagnostic":
+                self._pending_result_diagnostic_id = None
             if navigation_action == "prepare":
                 self._pending_preparation_draft = None
                 self.footer.configure(text=f"Navigation impossible; aucune recherche envoyée. {message}")
@@ -610,6 +684,8 @@ class SidjilyApp:
                 self._set_diagnostic_report("")
                 self.diagnostic_output.configure(text=message)
         except Exception:
+            if navigation_action == "result_diagnostic":
+                self._pending_result_diagnostic_id = None
             if navigation_action == "prepare":
                 self._pending_preparation_draft = None
                 self.footer.configure(text="Navigation impossible; aucune recherche Sidjilcom n'a été envoyée.")
@@ -622,6 +698,35 @@ class SidjilyApp:
                 self._pending_preparation_draft = None
                 self.footer.configure(text="Recherche Sidjilcom ouverte dans Chromium SIDJILY; formulaire prêt pour préparation locale.")
                 self._open_preparation_dialog(draft)
+                self._refresh_session_status()
+                return
+            if navigation_action == "result_diagnostic":
+                search_id = self._pending_result_diagnostic_id
+                self._pending_result_diagnostic_id = None
+                observation: SearchObservation = result
+                summary = observation.to_mapping()
+                if search_id:
+                    self.manager.store_unknown_search_diagnostic(search_id, summary)
+                report = [
+                    "DIAGNOSTIC STRUCTUREL ULTÉRIEUR — LECTURE SEULE",
+                    f"ID : {search_id or 'non associé'}",
+                    f"Titre : {observation.title or '—'}",
+                    f"URL assainie : {observation.sanitized_url}",
+                    f"Compteur éventuel : {observation.result_count if observation.result_count is not None else 'non détecté'}",
+                    f"Zone de résultat sémantique : {'oui' if observation.result_zone_found else 'non'}"
+                    f"{f' ({observation.result_zone_tag})' if observation.result_zone_tag else ''}",
+                    f"Tableaux visibles : {observation.table_count}",
+                    f"Lignes structurelles : {observation.row_count}",
+                    "Colonnes : " + (" · ".join(observation.columns) if observation.columns else "aucune détectée"),
+                    f"Pagination visible : {'oui' if observation.pagination_visible else 'non'}",
+                    f"Aucun résultat : {'oui' if observation.no_results else 'non'}",
+                    "Erreurs : " + (" · ".join(observation.errors) if observation.errors else "aucune détectée"),
+                    "Observation de la page actuellement ouverte; son rattachement au résultat initial n'est pas prouvé. "
+                    "Aucune nouvelle recherche soumise, aucune cellule d'entreprise lue, aucun détail ouvert.",
+                ]
+                self._set_diagnostic_report("\n".join(report))
+                self.diagnostic_output.configure(text="Diagnostic ultérieur enregistré sans nouvelle soumission.")
+                self.refresh()
                 self._refresh_session_status()
                 return
             page = result.page
@@ -655,22 +760,38 @@ class SidjilyApp:
         except (SearchExecutionError, SessionOperationError) as exc:
             error = str(exc)
             self.manager.fail_controlled_search(search_id, error)
+            search = self.manager.get_search(search_id)
+            self.selected_search_id = search_id
+            unknown = search.step == "result_unknown"
+            status_line = (
+                "SOUMISSION POSSIBLE — résultat inconnu. Ne relancez pas la recherche. "
+                "Utilisez ensuite « Diagnostiquer le résultat (lecture seule) » si la page est toujours ouverte."
+                if unknown else "Échec avant le clic Rechercher; aucune nouvelle tentative n'a été lancée."
+            )
             self._set_diagnostic_report(
                 "RECHERCHE SIDJILCOM CONTRÔLÉE — arrêtée sans nouvelle tentative\n"
-                f"ID : {search_id}\nÉtape : {self.manager.get_search(search_id).step}\n"
+                f"ID : {search_id}\nÉtape : {search.step}\n{status_line}\n"
                 f"Erreur : {error}\n\n"
                 "TEST RÉEL : un test ne peut être effectué que depuis votre PC avec votre session Sidjilcom.\n"
                 "TEST RÉEL : NON EFFECTUÉ PAR ARENA."
             )
-            self.diagnostic_output.configure(text="Recherche arrêtée. Aucun nouvel essai n'a été lancé.")
+            self.diagnostic_output.configure(text=status_line)
         except Exception:
             error = "Erreur interne; détails techniques omis pour protéger la session et les critères."
             self.manager.fail_controlled_search(search_id, error)
+            search = self.manager.get_search(search_id)
+            self.selected_search_id = search_id
+            unknown = search.step == "result_unknown"
+            status_line = (
+                "SOUMISSION POSSIBLE — résultat inconnu; ne relancez pas. Un diagnostic structurel en lecture seule est disponible."
+                if unknown else "Échec avant soumission; aucune nouvelle tentative automatique."
+            )
             self._set_diagnostic_report(
                 "RECHERCHE SIDJILCOM CONTRÔLÉE — arrêtée sans nouvelle tentative\n"
-                f"ID : {search_id}\nErreur : {error}\nTEST RÉEL : NON EFFECTUÉ PAR ARENA."
+                f"ID : {search_id}\nÉtape : {search.step}\n{status_line}\n"
+                f"Erreur : {error}\nTEST RÉEL : NON EFFECTUÉ PAR ARENA."
             )
-            self.diagnostic_output.configure(text="Recherche arrêtée; aucune nouvelle action n'a été tentée.")
+            self.diagnostic_output.configure(text=status_line)
         else:
             summary = observation.to_mapping()
             self.manager.complete_controlled_search(search_id, summary)
@@ -681,6 +802,8 @@ class SidjilyApp:
                 f"Titre : {observation.title or '—'}",
                 f"URL assainie : {observation.sanitized_url}",
                 f"Nombre de résultats affiché : {observation.result_count if observation.result_count is not None else 'non détecté'}",
+                f"Zone de résultat sémantique : {'oui' if observation.result_zone_found else 'non'}"
+                f"{f' ({observation.result_zone_tag})' if observation.result_zone_tag else ''}",
                 f"Tableaux visibles : {observation.table_count}",
                 f"Lignes du premier tableau : {observation.row_count}",
                 "Colonnes : " + (" · ".join(observation.columns) if observation.columns else "aucune détectée"),
@@ -804,6 +927,7 @@ class _NewSearchDialog:
         self.initial_search = initial_search
         self.draft_id = initial_search.id if initial_search is not None else None
         self.result: tuple[str, SearchCriteria] | None = None
+        self.launch_confirmed = False
         self.window = tk.Toplevel(parent)
         self.window.title(
             "Première recherche réelle — confirmation requise"
@@ -817,7 +941,7 @@ class _NewSearchDialog:
         self.name = tk.StringVar(
             value=(
                 initial_search.name if initial_search is not None
-                else "Test réel contrôlé — Wilaya 34000" if launch_mode
+                else "Test réel contrôlé — 442102 / 34000" if launch_mode
                 else "Nouvelle recherche"
             )
         )
@@ -922,24 +1046,25 @@ class _NewSearchDialog:
             state="disabled",
         )
         self.save_button.pack(side="right", padx=8)
+        self.launch_button: ttk.Button | None = None
+        if not launch_mode:
+            self.launch_button = ttk.Button(
+                buttons, text="Lancer la recherche", command=self._launch_search, state="disabled"
+            )
+            self.launch_button.pack(side="left")
         ttk.Button(
             buttons,
             text="Préparer le récapitulatif",
             command=self._prepare_preview,
         ).pack(side="right")
-        if not launch_mode:
-            ttk.Button(
-                buttons,
-                text="Lancer la recherche",
-                command=self._explain_execution_not_available,
-            ).pack(side="left")
 
         for variable in (*self._variables.values(), *self._number_variables.values(), self.name):
             self._watch(variable)
         self.mode.trace_add("write", self._on_mode_change)
         self._load_initial_values(initial_search)
         if launch_mode and initial_search is None:
-            self._variables["commune_wilaya"].set("34000 : BORDJ BOU ARRERIDJ")
+            self._variables["commune_wilaya"].set("34000")
+            self._variables["activite"].set("442102")
         if self.mode.get():
             self._render_mode_fields()
         self.window.bind("<Return>", lambda _event: self._prepare_preview())
@@ -1091,6 +1216,8 @@ class _NewSearchDialog:
             return
         if hasattr(self, "save_button"):
             self.save_button.configure(state="disabled")
+            if self.launch_button is not None:
+                self.launch_button.configure(state="disabled")
             self.status.configure(text="Les critères ont changé; préparez à nouveau le récapitulatif.")
             self._set_preview("")
             self.count_label.configure(text="Critères renseignés : —")
@@ -1122,6 +1249,8 @@ class _NewSearchDialog:
             if show_errors:
                 messagebox.showwarning("Nom requis", "Saisissez un nom pour ce brouillon.", parent=self.window)
             self.save_button.configure(state="disabled")
+            if self.launch_button is not None:
+                self.launch_button.configure(state="disabled")
             self.status.configure(text="Le nom du brouillon est obligatoire.")
             return
         try:
@@ -1129,32 +1258,34 @@ class _NewSearchDialog:
             preview_text = format_preparation_summary(criteria)
         except CriteriaValidationError as exc:
             self.save_button.configure(state="disabled")
+            if self.launch_button is not None:
+                self.launch_button.configure(state="disabled")
             self.status.configure(text="Les critères ne sont pas valides.")
             if show_errors:
                 messagebox.showwarning("Critères invalides", str(exc), parent=self.window)
             return
         launch_allowed = True
-        if self.launch_mode:
-            try:
-                validate_first_controlled_search(criteria)
-            except SearchExecutionError:
-                launch_allowed = False
-            preview_text += (
-                "\n\nPérimètre de ce flux réel conservé : uniquement la première recherche strictement validée. "
-                "Toute soumission exige la confirmation explicite ci-dessous."
-            )
+        try:
+            validate_first_controlled_search(criteria)
+        except SearchExecutionError:
+            launch_allowed = False
+        preview_text += (
+            "\n\nLancement réel autorisé uniquement pour Personne morale, "
+            "Activité = 442102 et Commune/Wilaya = 34000. "
+            "Toute soumission exige une confirmation explicite."
+        )
         self.count_label.configure(text=f"Critères renseignés : {count_filled_criteria(criteria)}")
         self._set_preview(preview_text)
         if self.launch_mode and not launch_allowed:
-            self.status.configure(
-                text="Récapitulatif prêt, mais cette combinaison n'est pas autorisée pour ce flux réel."
-            )
+            self.status.configure(text="Récapitulatif prêt, mais cette combinaison n'est pas autorisée pour ce flux réel.")
             self.save_button.configure(state="disabled")
         else:
             self.status.configure(
-                text="Récapitulatif prêt. Aucune requête réseau, sélection de suggestion ou soumission n'a été déclenchée."
+                text="Récapitulatif prêt. Aucune requête réseau ni soumission n'a été déclenchée."
             )
             self.save_button.configure(state="normal")
+        if self.launch_button is not None:
+            self.launch_button.configure(state="normal" if launch_allowed else "disabled")
 
     def _set_preview(self, text: str) -> None:
         self.preview.configure(state="normal")
@@ -1184,18 +1315,17 @@ class _NewSearchDialog:
         self.result = name, criteria
         self.window.destroy()
 
-    def _explain_execution_not_available(self) -> None:
-        messagebox.showinfo(
-            "Exécution à l'étape suivante",
-            "Cette étape sert uniquement à préparer et enregistrer le récapitulatif. "
-            "L'exécution réelle sera disponible dans une étape ultérieure, après confirmation explicite. "
-            "Aucune recherche n'a été envoyée à Sidjilcom.",
-            parent=self.window,
-        )
-
     def _launch_search(self) -> None:
-        """Flux réel historique conservé, distinct du parcours préparatoire normal."""
+        """Demande une confirmation explicite avant de retourner l'ordre de lancement."""
         name = self.name.get().strip()
+        launch_control = self.save_button if self.launch_mode else self.launch_button
+        if launch_control is None or str(launch_control.cget("state")) == "disabled":
+            messagebox.showinfo(
+                "Récapitulatif requis",
+                "Préparez d'abord un récapitulatif valide pour le périmètre autorisé. Aucune recherche n'a été soumise.",
+                parent=self.window,
+            )
+            return
         if not name:
             messagebox.showwarning("Nom requis", "Saisissez un nom pour cette recherche.", parent=self.window)
             return
@@ -1220,6 +1350,7 @@ class _NewSearchDialog:
         if not confirmed:
             return
         self.result = name, criteria
+        self.launch_confirmed = True
         self.window.destroy()
 
 

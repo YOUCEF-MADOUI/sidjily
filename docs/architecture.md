@@ -42,13 +42,13 @@ tests/
 
 ## Première recherche contrôlée
 
-Le préparateur général conserve les dataclasses et le registre `SIDJILCOM_CONTROL_MAP`; il n'existe pas de second catalogue de champs. Le bouton réel est limité par une politique dupliquée côté UI **et** gestionnaire de session à Personne morale + Commune/Wilaya `34000 : BORDJ BOU ARRERIDJ`, sans autre critère. Cette contrainte est volontaire pour le premier test.
+Le préparateur général conserve les dataclasses et le registre `SIDJILCOM_CONTROL_MAP`; il n'existe pas de second catalogue de champs. Le bouton réel est limité par une validation centrale à Personne morale + Activité `442102` + critère conjoint Commune/Wilaya `34000`, sans autre critère. Une confirmation Oui/Non explicite précède toute action Playwright. SQLite conserve une réservation singleton après le début possible du clic; toute interruption ambiguë interdit une seconde soumission. Une erreur démontrée avant le stade `submitting` libère la réservation, sans relancer automatiquement l'ancienne tâche.
 
 La fenêtre est modale : l'utilisateur prépare le récapitulatif, clique explicitement **Lancer la recherche**, puis confirme. Seulement après ce consentement, le thread navigateur sélectionne le lien de mode, re-résout les champs par suffixe observé, refuse tout champ absent/ambigu/prérempli, utilise le `AutocompleteTester` existant et sélectionne une suggestion qui correspond exactement à la valeur confirmée. Il n'existe qu'un seul point de clic sur l'unique bouton visible/enabled **Rechercher** du formulaire identifié. Toute incertitude arrête l'opération; le flux contrôlé n'est ni reprenable ni relançable automatiquement.
 
 Après le clic, le pilote n'expose que titre, URL sans query/fragment, compteur éventuel, nombre de tableaux/lignes, en-têtes, pagination, message d'absence de résultat, alertes et état de session. Le JavaScript de diagnostic ne lit pas les cellules du tableau. Aucun détail d'entreprise, collecte, découpage, pagination ou export n'est présent.
 
-`TaskManager` persiste l'identifiant, le mode/critères, l'état, les dates, l'étape, l'erreur fixe et un résumé structurel optionnel. La migration SQLite version 2 ajoute `searches.step` et `searches.result_summary_json`; les profils, cookies et jetons ne sont jamais enregistrés. Les recherches contrôlées sont bloquées dans les méthodes de reprise/suspension afin d'empêcher un second envoi.
+`TaskManager` persiste l'identifiant, le mode/critères, l'état, les dates, l'étape, l'erreur fixe et un résumé structurel optionnel. La migration SQLite version 3 ajoute la réservation persistante de la recherche contrôlée; la version 2 avait ajouté `searches.step` et `searches.result_summary_json`. La date, les critères, les étapes, le diagnostic préalable assaini et le résumé structurel restent locaux. Les profils, valeurs DOM diagnostiques, cookies, jetons et identifiants de session ne sont jamais enregistrés. Une interruption au clic ou après lui devient `result_unknown`, sans reprise; un diagnostic structurel ultérieur n'exécute pas le moteur de recherche.
 
 ## Configuration
 

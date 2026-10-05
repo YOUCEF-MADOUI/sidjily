@@ -19,7 +19,10 @@ def main() -> None:
         manager = TaskManager(Database(data_dir / "sidjily.sqlite3"))
         recovered = manager.recover_interrupted()
         if recovered:
-            logger.warning("%s tâche(s) interrompue(s) restaurée(s) pour reprise.", recovered)
+            logger.warning(
+                "%s tâche(s) interrompue(s) traitée(s); une recherche contrôlée n'est jamais relancée automatiquement.",
+                recovered,
+            )
         try:
             import tkinter as tk
             from sidjily.ui.app import SidjilyApp

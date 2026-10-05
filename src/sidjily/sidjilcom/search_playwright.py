@@ -65,6 +65,17 @@ _RESULTS_DOM_SCRIPT = r"""() => {
     const outsideTable = element => !element.closest('table');
     const tables = Array.from(document.querySelectorAll('table')).filter(visible);
     const firstTable = tables[0] || null;
+    const semanticZone = element => {
+        let current = element ? element.parentElement : null;
+        while (current) {
+            const tag = String(current.tagName || '').toLowerCase();
+            const role = String(current.getAttribute('role') || '').toLowerCase();
+            if (tag === 'main' || tag === 'section' || role === 'main' || role === 'region') return current;
+            current = current.parentElement;
+        }
+        return null;
+    };
+    const resultZone = semanticZone(firstTable);
     const headers = firstTable ? Array.from(firstTable.querySelectorAll('thead th, tr th'))
         .filter(visible).map(cell => (cell.innerText || cell.textContent || '').replace(/\s+/gu, ' ').trim()).filter(Boolean) : [];
     const rows = firstTable ? Array.from(firstTable.querySelectorAll('tbody tr')).filter(visible).length : 0;
@@ -113,6 +124,8 @@ _RESULTS_DOM_SCRIPT = r"""() => {
         title: document.title || '',
         tableCount: tables.length,
         rowCount: rows,
+        resultZoneFound: !!resultZone && visible(resultZone),
+        resultZoneTag: resultZone && visible(resultZone) ? String(resultZone.tagName || '').toLowerCase() : '',
         headers: headers.slice(0, 40),
         paginationVisible: pagination,
         noResults,
@@ -677,6 +690,8 @@ class PlaywrightSearchDriver:
                 no_results=bool(raw.get("noResults", False)),
                 errors=errors,
                 session_expired=bool(raw.get("sessionExpired", False)),
+                result_zone_found=bool(raw.get("resultZoneFound", False)),
+                result_zone_tag=sanitize_metadata_text(raw.get("resultZoneTag", ""), 24),
             )
         except SearchExecutionError:
             raise

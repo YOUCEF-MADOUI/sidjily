@@ -38,14 +38,22 @@ class SearchPreparationUiContractTests(unittest.TestCase):
         self.assertNotIn("execute_search", called_attributes)
         self.assertNotIn("prepare_autocomplete_test", called_attributes)
         self.assertNotIn("select_autocomplete_suggestion", called_attributes)
-        self.assertIn("Aucune recherche n'a été envoyée à Sidjilcom.", source)
+        self.assertIn("Aucune requête réseau ni soumission", source)
+        self.assertIn("askyesno", source)
+        self.assertIn("launch_confirmed = True", source)
+        self.assertIn("Lancer cette recherche réelle maintenant ?", source)
 
-    def test_real_search_button_in_preparation_is_informational(self) -> None:
+    def test_real_search_button_requires_valid_preview_and_calls_confirmation_flow(self) -> None:
         dialog_node, _source = class_source("_NewSearchDialog")
         _init_node, init_source = method_source(dialog_node, "__init__")
-        self.assertIn('if launch_mode else "Préparer une recherche"', init_source)
+        _launch_node, launch_source = method_source(dialog_node, "_launch_search")
         self.assertIn('text="Lancer la recherche"', init_source)
-        self.assertIn('command=self._explain_execution_not_available', init_source)
+        self.assertIn('command=self._launch_search', init_source)
+        self.assertIn('state="disabled"', init_source)
+        self.assertIn("askyesno", launch_source)
+        self.assertIn("if not confirmed", launch_source)
+        self.assertLess(launch_source.index("if not confirmed"), launch_source.index("self.launch_confirmed = True"))
+        self.assertIn("self.window.destroy()", launch_source)
 
     def test_new_find_and_continue_actions_share_one_preparation_dialog(self) -> None:
         app_node, _source = class_source("SidjilyApp")
@@ -61,9 +69,15 @@ class SearchPreparationUiContractTests(unittest.TestCase):
         self.assertIn("self._open_preparation_dialog()", new_source)
         self.assertNotIn("self._begin_preparation()", new_source)
         self.assertIn("self._open_preparation_dialog(draft)", continue_source)
+        _start_node, start_source = method_source(app_node, "_start_confirmed_controlled_search")
+        self.assertIn("confirmed=True", start_source)
+        self.assertIn("on_pre_submit", start_source)
+        self.assertIn("promote_draft_to_controlled_search", start_source)
         self.assertIn('self._pending_navigation_action = "prepare"', find_source)
         self.assertIn("self.session_manager.open_enterprise_search()", find_source)
         self.assertIn("self._open_preparation_dialog(draft)", consume_source)
+        self.assertIn("diagnose_search_results", class_source("SidjilyApp")[1])
+        self.assertIn("store_unknown_search_diagnostic", class_source("SidjilyApp")[1])
 
     def test_diagnostics_are_built_in_a_collapsible_developer_area(self) -> None:
         app_node, _source = class_source("SidjilyApp")

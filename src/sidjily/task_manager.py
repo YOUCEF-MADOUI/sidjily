@@ -7,6 +7,7 @@ import sqlite3
 import uuid
 from collections.abc import Iterable
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from sidjily.database import Database, utc_now
 from sidjily.models import Search, SearchTask, Status
@@ -14,6 +15,55 @@ from sidjily.models import Search, SearchTask, Status
 
 class InvalidTransition(ValueError):
     """Une opération ne correspond pas à l'état courant de la recherche."""
+
+
+def _safe_structural_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    """Conserve uniquement les métadonnées structurelles de résultats explicitement autorisées."""
+    def bounded_count(key: str) -> int | None:
+        value = summary.get(key)
+        return value if type(value) is int and 0 <= value <= 1_000_000_000 else None
+
+    def safe_text(value: object, limit: int) -> str:
+        return " ".join(str(value).split())[:limit]
+
+    def safe_url(value: object) -> str:
+        try:
+            parsed = urlsplit(str(value))
+            if parsed.scheme.casefold() != "https" or not parsed.hostname:
+                return ""
+            host = parsed.hostname.casefold()
+            trusted = host == "sidjilcom.cnrc.dz" or host.endswith(".sidjilcom.cnrc.dz")
+            netloc = host
+            if parsed.port and parsed.port not in (80, 443):
+                netloc = f"{host}:{parsed.port}"
+            path = parsed.path if trusted else "/[chemin masqué]"
+            return urlunsplit(("https", netloc, path or "/", "", ""))[:500]
+        except (TypeError, ValueError):
+            return ""
+
+    columns = summary.get("columns", [])
+    errors = summary.get("errors", [])
+    if not isinstance(columns, (list, tuple)):
+        columns = []
+    if not isinstance(errors, (list, tuple)):
+        errors = []
+    return {
+        "title": safe_text(summary.get("title", ""), 160),
+        "url": safe_url(summary.get("url", "")),
+        "result_count": bounded_count("result_count"),
+        "table_count": bounded_count("table_count") or 0,
+        "row_count": bounded_count("row_count") or 0,
+        "columns": [safe_text(item, 120) for item in columns[:40] if isinstance(item, str)],
+        "pagination_visible": bool(summary.get("pagination_visible", False)),
+        "no_results": bool(summary.get("no_results", False)),
+        "errors": [safe_text(item, 200) for item in errors[:8] if isinstance(item, str)],
+        "session_expired": bool(summary.get("session_expired", False)),
+        "result_zone_found": bool(summary.get("result_zone_found", False)),
+        "result_zone_tag": safe_text(summary.get("result_zone_tag", ""), 24),
+        "details_opened": False,
+        "automatic_pagination": False,
+        "company_rows_collected": False,
+    }
 
 
 class TaskManager:
@@ -72,6 +122,50 @@ class TaskManager:
             )
         return self.get_search(search_id)
 
+    def promote_draft_to_controlled_search(
+        self, search_id: str, name: str, criteria: dict[str, Any]
+    ) -> Search:
+        """Convertit atomiquement un brouillon confirmé en tentative réelle unique."""
+        now = utc_now()
+        with self.database.connection(immediate=True) as connection:
+            task = connection.execute(
+                "SELECT id, status FROM tasks WHERE search_id = ? AND task_type = 'sidjily_search_draft'",
+                (search_id,),
+            ).fetchone()
+            if task is None:
+                raise KeyError(f"Brouillon introuvable : {search_id}")
+            if task["status"] != Status.PENDING:
+                raise InvalidTransition("Seul un brouillon en attente peut être lancé.")
+            claimed = connection.execute(
+                "SELECT 1 FROM controlled_search_claim WHERE claim_id = 1"
+            ).fetchone()
+            if claimed is not None:
+                raise InvalidTransition("La recherche contrôlée unique a déjà été réservée; ce brouillon ne peut pas être soumis.")
+            connection.execute(
+                "UPDATE tasks SET task_type = 'sidjilcom_controlled_search', criteria_json = ?, "
+                "updated_at = ? WHERE id = ?",
+                (self.database.encode_json(criteria), now, task["id"]),
+            )
+            connection.execute(
+                "UPDATE searches SET name = ?, criteria_json = ?, status = ?, step = 'prepared', "
+                "updated_at = ?, last_error = NULL, result_summary_json = NULL WHERE id = ?",
+                (
+                    name.strip() or "Recherche sans titre", self.database.encode_json(criteria),
+                    Status.PENDING, now, search_id,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO controlled_search_claim(claim_id, search_id, claimed_at) VALUES (1, ?, ?)",
+                (search_id, now),
+            )
+            self.database.add_event(
+                connection,
+                "Brouillon explicitement confirmé et converti en recherche contrôlée; aucune reprise automatique.",
+                search_id=search_id,
+                task_id=task["id"],
+            )
+        return self.get_search(search_id)
+
     def list_drafts(self, limit: int = 100) -> list[Search]:
         """Retourne les brouillons préparatoires, du plus récent au plus ancien."""
         with self.database.connection() as connection:
@@ -104,6 +198,12 @@ class TaskManager:
         search_id, task_id = str(uuid.uuid4()), str(uuid.uuid4())
         now = utc_now()
         with self.database.connection(immediate=True) as connection:
+            if task_type == "sidjilcom_controlled_search":
+                claimed = connection.execute(
+                    "SELECT 1 FROM controlled_search_claim WHERE claim_id = 1"
+                ).fetchone()
+                if claimed is not None:
+                    raise InvalidTransition("La recherche contrôlée unique a déjà été réservée; aucune nouvelle soumission n'est autorisée.")
             connection.execute(
                 "INSERT INTO searches(id, name, criteria_json, status, created_at, updated_at, step, result_summary_json) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -118,6 +218,11 @@ class TaskManager:
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (task_id, search_id, task_type, self.database.encode_json(criteria), Status.PENDING, now, now),
             )
+            if task_type == "sidjilcom_controlled_search":
+                connection.execute(
+                    "INSERT INTO controlled_search_claim(claim_id, search_id, claimed_at) VALUES (1, ?, ?)",
+                    (search_id, now),
+                )
             message = (
                 "Recherche Sidjilcom contrôlée créée; étape préparée, aucune recherche soumise."
                 if task_type == "sidjilcom_controlled_search"
@@ -160,7 +265,8 @@ class TaskManager:
         step_value = str(getattr(step, "value", step))
         allowed = {
             "prepared", "mode_selection", "form_validation", "filling_criteria",
-            "submitting", "observing_results", "completed", "failed",
+            "submitting", "submitted", "observing_results", "results_detected",
+            "no_results", "completed", "failed", "result_unknown",
         }
         if step_value not in allowed:
             raise ValueError("Étape de recherche contrôlée inconnue.")
@@ -184,13 +290,82 @@ class TaskManager:
                 search_id=search_id, task_id=task["id"],
             )
 
-    def complete_controlled_search(self, search_id: str, summary: dict[str, Any]) -> None:
+    def update_controlled_search_pre_submit_diagnostic(
+        self, search_id: str, diagnostic: dict[str, Any]
+    ) -> None:
+        """Enregistre un contrôle de formulaire dénué de valeurs et secrets, avant le clic."""
+        if diagnostic.get("kind") != "sidjilcom_pre_submit_diagnostic":
+            raise ValueError("Diagnostic préalable invalide.")
+        if any(diagnostic.get(key) is not False for key in (
+            "sensitive_values_saved", "cookies_saved", "tokens_saved", "session_identifiers_saved",
+        )):
+            raise ValueError("Un diagnostic préalable ne peut pas contenir de secrets.")
+        safe_controls = []
+        controls = diagnostic.get("controls", [])
+        criteria = diagnostic.get("criteria", [])
+        if not isinstance(controls, list) or not isinstance(criteria, list):
+            raise ValueError("Contrôles du diagnostic préalable invalides.")
+        allowed_criteria = {"activite", "commune_wilaya"}
+        if any(not isinstance(item, str) or item not in allowed_criteria for item in criteria):
+            raise ValueError("Critères du diagnostic préalable invalides.")
+        allowed_control_keys = {"criterion", "tag", "type", "visible", "enabled", "empty_before_fill"}
+        for control in controls:
+            if not isinstance(control, dict) or set(control) - allowed_control_keys:
+                raise ValueError("Le diagnostic préalable contient un champ non autorisé.")
+            if control.get("criterion") not in allowed_criteria:
+                raise ValueError("Critère de contrôle préalable non autorisé.")
+            if control.get("tag") not in {"input", "select", "textarea"}:
+                raise ValueError("Type de contrôle préalable non autorisé.")
+            if control.get("type") not in {"text", "date", "select-one"}:
+                raise ValueError("Type d'entrée préalable non autorisé.")
+            if any(type(control.get(key)) is not bool for key in ("visible", "enabled", "empty_before_fill")):
+                raise ValueError("État de contrôle préalable invalide.")
+            safe_controls.append({key: control.get(key) for key in allowed_control_keys if key in control})
+        safe_diagnostic = {
+            "kind": "sidjilcom_pre_submit_diagnostic",
+            "mode": "PERSONNE_MORALE" if diagnostic.get("mode") == "PERSONNE_MORALE" else "",
+            "criteria": list(criteria[:20]),
+            "controls": safe_controls,
+            "all_visible_controls_empty_before_fill": bool(diagnostic.get("all_visible_controls_empty_before_fill", False)),
+            "search_button_count": max(0, min(int(diagnostic.get("search_button_count", 0)), 20)),
+            "search_button_enabled": bool(diagnostic.get("search_button_enabled", False)),
+            "sensitive_values_saved": False,
+            "cookies_saved": False,
+            "tokens_saved": False,
+            "session_identifiers_saved": False,
+            "captured_at": utc_now(),
+        }
         now = utc_now()
-        count = summary.get("result_count")
-        result_count = count if isinstance(count, int) and count >= 0 else 0
         with self.database.connection(immediate=True) as connection:
             task = connection.execute(
                 "SELECT id, status FROM tasks WHERE search_id = ? AND task_type = 'sidjilcom_controlled_search'",
+                (search_id,),
+            ).fetchone()
+            if task is None:
+                raise KeyError(f"Recherche Sidjilcom introuvable : {search_id}")
+            if task["status"] != Status.RUNNING:
+                raise InvalidTransition("Le diagnostic préalable exige une recherche contrôlée en cours.")
+            connection.execute(
+                "UPDATE searches SET result_summary_json = ?, updated_at = ? WHERE id = ?",
+                (self.database.encode_json({"pre_submit_diagnostic": safe_diagnostic}), now, search_id),
+            )
+            connection.execute("UPDATE tasks SET updated_at = ? WHERE id = ?", (now, task["id"]))
+            self.database.add_event(
+                connection,
+                "Diagnostic structurel préalable enregistré sans valeurs, cookies, tokens ni identifiants.",
+                search_id=search_id, task_id=task["id"],
+            )
+
+    def complete_controlled_search(self, search_id: str, summary: dict[str, Any]) -> None:
+        now = utc_now()
+        safe_summary = _safe_structural_summary(summary)
+        count = safe_summary.get("result_count")
+        result_count = count if isinstance(count, int) and count >= 0 else 0
+        with self.database.connection(immediate=True) as connection:
+            task = connection.execute(
+                "SELECT t.id, t.status, s.result_summary_json FROM tasks AS t "
+                "JOIN searches AS s ON s.id = t.search_id "
+                "WHERE t.search_id = ? AND t.task_type = 'sidjilcom_controlled_search'",
                 (search_id,),
             ).fetchone()
             if task is None:
@@ -201,9 +376,15 @@ class TaskManager:
                 "UPDATE tasks SET status = ?, result_count = ?, updated_at = ?, completed_at = ?, error = NULL WHERE id = ?",
                 (Status.COMPLETED, result_count, now, now, task["id"]),
             )
+            terminal_step = "no_results" if safe_summary.get("no_results") or count == 0 else "results_detected"
+            previous = json.loads(task["result_summary_json"]) if task["result_summary_json"] else {}
+            persisted_summary = dict(safe_summary)
+            for key in ("pre_submit_diagnostic", "follow_up_structural_diagnostic"):
+                if key in previous:
+                    persisted_summary[key] = previous[key]
             connection.execute(
-                "UPDATE searches SET status = ?, step = 'completed', updated_at = ?, last_error = NULL, result_summary_json = ? WHERE id = ?",
-                (Status.COMPLETED, now, self.database.encode_json(summary), search_id),
+                "UPDATE searches SET status = ?, step = ?, updated_at = ?, last_error = NULL, result_summary_json = ? WHERE id = ?",
+                (Status.COMPLETED, terminal_step, now, self.database.encode_json(persisted_summary), search_id),
             )
             self.database.add_event(
                 connection, "Recherche contrôlée terminée; seule la structure des résultats a été observée.",
@@ -215,24 +396,69 @@ class TaskManager:
         now = utc_now()
         with self.database.connection(immediate=True) as connection:
             task = connection.execute(
-                "SELECT id, status FROM tasks WHERE search_id = ? AND task_type = 'sidjilcom_controlled_search'",
+                "SELECT t.id, t.status, s.step FROM tasks AS t JOIN searches AS s ON s.id = t.search_id "
+                "WHERE t.search_id = ? AND t.task_type = 'sidjilcom_controlled_search'",
                 (search_id,),
             ).fetchone()
             if task is None:
                 raise KeyError(f"Recherche Sidjilcom introuvable : {search_id}")
             if task["status"] != Status.RUNNING:
                 return
+            terminal_step = (
+                "result_unknown"
+                if task["step"] in {
+                    "submitting", "submitted", "observing_results", "results_detected", "no_results",
+                }
+                else "failed"
+            )
+            message = (
+                "La soumission a pu avoir lieu; le résultat est inconnu. Ne relancez pas cette recherche."
+                if terminal_step == "result_unknown" else safe_error
+            )
             connection.execute(
                 "UPDATE tasks SET status = ?, error = ?, updated_at = ? WHERE id = ?",
-                (Status.FAILED, safe_error, now, task["id"]),
+                (Status.FAILED, message, now, task["id"]),
             )
             connection.execute(
-                "UPDATE searches SET status = ?, step = 'failed', last_error = ?, updated_at = ? WHERE id = ?",
-                (Status.FAILED, safe_error, now, search_id),
+                "UPDATE searches SET status = ?, step = ?, last_error = ?, updated_at = ? WHERE id = ?",
+                (Status.FAILED, terminal_step, message, now, search_id),
+            )
+            if terminal_step == "failed":
+                # Autorise une future tentative seulement si l'état prouve qu'aucun clic
+                # n'a commencé; les tâches existantes ne sont jamais reprises.
+                connection.execute(
+                    "DELETE FROM controlled_search_claim WHERE claim_id = 1 AND search_id = ?",
+                    (search_id,),
+                )
+            self.database.add_event(
+                connection, f"Recherche contrôlée arrêtée : {message}", level="ERROR",
+                search_id=search_id, task_id=task["id"],
+            )
+
+    def store_unknown_search_diagnostic(self, search_id: str, summary: dict[str, Any]) -> None:
+        """Ajoute une observation en lecture seule à une recherche soumise de résultat inconnu."""
+        now = utc_now()
+        with self.database.connection(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT s.step, s.result_summary_json, t.id AS task_id, t.status AS task_status "
+                "FROM searches AS s JOIN tasks AS t ON t.search_id = s.id "
+                "WHERE s.id = ? AND t.task_type = 'sidjilcom_controlled_search'",
+                (search_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Recherche Sidjilcom introuvable : {search_id}")
+            if row["step"] != "result_unknown" or row["task_status"] != Status.FAILED:
+                raise InvalidTransition("Seule une recherche de résultat inconnu peut recevoir un diagnostic ultérieur.")
+            current = json.loads(row["result_summary_json"]) if row["result_summary_json"] else {}
+            current["follow_up_structural_diagnostic"] = _safe_structural_summary(summary)
+            connection.execute(
+                "UPDATE searches SET result_summary_json = ?, updated_at = ? WHERE id = ?",
+                (self.database.encode_json(current), now, search_id),
             )
             self.database.add_event(
-                connection, f"Recherche contrôlée arrêtée : {safe_error}", level="ERROR",
-                search_id=search_id, task_id=task["id"],
+                connection,
+                "Diagnostic structurel ultérieur enregistré en lecture seule; aucune nouvelle recherche soumise.",
+                search_id=search_id, task_id=row["task_id"],
             )
 
     def get_search(self, search_id: str) -> Search:
@@ -431,27 +657,61 @@ class TaskManager:
             self.database.add_event(connection, "Reprise demandée; les étapes terminées sont conservées.", search_id=search_id)
 
     def recover_interrupted(self) -> int:
-        """Rend reprenables les tâches laissées en cours après un arrêt brutal."""
+        """Récupère les tâches normales; une recherche contrôlée interrompue n'est jamais reprise."""
         with self.database.connection(immediate=True) as connection:
             running = connection.execute(
-                "SELECT id, search_id FROM tasks WHERE status = ?", (Status.RUNNING,)
+                "SELECT id, search_id, task_type FROM tasks WHERE status = ?", (Status.RUNNING,)
             ).fetchall()
+            generic_running = [row for row in running if row["task_type"] != "sidjilcom_controlled_search"]
+            controlled_running = [row for row in running if row["task_type"] == "sidjilcom_controlled_search"]
             now = utc_now()
-            connection.execute(
-                "UPDATE tasks SET status = ?, updated_at = ? WHERE status = ?",
-                (Status.PENDING, now, Status.RUNNING),
-            )
-            connection.execute(
-                "UPDATE searches SET status = ?, updated_at = ? WHERE status = ?",
-                (Status.SUSPENDED, now, Status.RUNNING),
-            )
-            for task in running:
+            if generic_running:
+                generic_ids = [row["id"] for row in generic_running]
+                placeholders = ",".join("?" for _ in generic_ids)
+                connection.execute(
+                    f"UPDATE tasks SET status = ?, updated_at = ? WHERE id IN ({placeholders})",
+                    (Status.PENDING, now, *generic_ids),
+                )
+                for search_id in {row["search_id"] for row in generic_running}:
+                    connection.execute(
+                        "UPDATE searches SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+                        (Status.SUSPENDED, now, search_id, Status.RUNNING),
+                    )
+                    self.database.add_event(
+                        connection,
+                        "Interruption détectée; tâche normale conservée pour reprise.",
+                        level="WARNING", search_id=search_id,
+                    )
+            for row in controlled_running:
+                search = connection.execute(
+                    "SELECT step FROM searches WHERE id = ?", (row["search_id"],)
+                ).fetchone()
+                uncertain = search is not None and search["step"] in {
+                    "submitting", "submitted", "observing_results", "results_detected", "no_results",
+                }
+                terminal_step = "result_unknown" if uncertain else "failed"
+                message = (
+                    "Interruption pendant ou après la soumission; le résultat est inconnu. "
+                    "La recherche ne sera pas relancée automatiquement."
+                    if uncertain else
+                    "Interruption d'une recherche contrôlée; aucune reprise automatique n'est autorisée."
+                )
+                connection.execute(
+                    "UPDATE tasks SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+                    (Status.FAILED, message, now, row["id"]),
+                )
+                connection.execute(
+                    "UPDATE searches SET status = ?, step = ?, last_error = ?, updated_at = ? WHERE id = ?",
+                    (Status.FAILED, terminal_step, message, now, row["search_id"]),
+                )
+                if not uncertain:
+                    connection.execute(
+                        "DELETE FROM controlled_search_claim WHERE claim_id = 1 AND search_id = ?",
+                        (row["search_id"],),
+                    )
                 self.database.add_event(
-                    connection,
-                    "Interruption détectée; tâche conservée pour reprise.",
-                    level="WARNING",
-                    search_id=task["search_id"],
-                    task_id=task["id"],
+                    connection, message, level="WARNING",
+                    search_id=row["search_id"], task_id=row["id"],
                 )
         return len(running)
 

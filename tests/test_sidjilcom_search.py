@@ -40,16 +40,21 @@ class FakeSearchDriver:
         self.selected_mode: list[SearchMode] = []
         self.submissions = 0
         self.steps: list[SearchStep] = []
-        self.autocomplete_suggestions = ("34000 : BORDJ BOU ARRERIDJ",)
+        self.autocomplete_suggestions: tuple[str, ...] | None = None
         self.autocomplete_status = AutocompleteTestStatus.SUGGESTIONS
         self.autocomplete_token = "token"
         self.autocomplete_selected: list[int] = []
         self.autocomplete_resets: list[str] = []
+        self._last_suggestions: tuple[str, ...] = ()
+        self._last_autocomplete_field = ""
         self.selection_accepted = True
         self.marker_change_after_fill = False
+        self.missing_control: str | None = None
+        self.ambiguous_form = False
         self.all_empty = True
         self.button_count = 1
         self.button_enabled = True
+        self.observation_error = False
         self.result = SearchObservation(
             title="Résultats de recherche",
             sanitized_url=self.marker,
@@ -71,6 +76,8 @@ class FakeSearchDriver:
         return self.marker
 
     def inspect_form(self, mode: SearchMode, criteria: tuple[MappedCriterion, ...]) -> SearchFormSnapshot:
+        if self.ambiguous_form:
+            raise SearchExecutionError("ambiguous form")
         self.controls = tuple(
             SearchControl(
                 criterion=item.criterion,
@@ -86,6 +93,7 @@ class FakeSearchDriver:
                 handle=item.criterion,
             )
             for index, item in enumerate(criteria)
+            if item.criterion != self.missing_control
         )
         return SearchFormSnapshot(
             mode=mode,
@@ -122,7 +130,10 @@ class FakeSearchDriver:
 
     def prepare_autocomplete(self, field_id: str, value: str) -> AutocompleteObservation:
         self.fill_calls.append((field_id, value))
-        suggestions = tuple(self._suggestion(index, text) for index, text in enumerate(self.autocomplete_suggestions))
+        observed_suggestions = self.autocomplete_suggestions or (value,)
+        self._last_suggestions = observed_suggestions
+        self._last_autocomplete_field = field_id
+        suggestions = tuple(self._suggestion(index, text) for index, text in enumerate(observed_suggestions))
         control = AutocompleteControlInfo(
             field_id=field_id,
             label=field_id,
@@ -168,9 +179,9 @@ class FakeSearchDriver:
 
     def select_autocomplete(self, token: str, index: int) -> AutocompleteSelectionResult:
         self.autocomplete_selected.append(index)
-        value = self.autocomplete_suggestions[index]
+        value = self._last_suggestions[index]
         return AutocompleteSelectionResult(
-            field_id="commune_wilaya",
+            field_id=self._last_autocomplete_field,
             suggestion_text=value,
             accepted=self.selection_accepted,
             input_matches_suggestion=self.selection_accepted,
@@ -186,29 +197,41 @@ class FakeSearchDriver:
         self.submissions += 1
 
     def observe_results(self) -> SearchObservation:
+        if self.observation_error:
+            raise RuntimeError("simulated observation interruption")
         return self.result
 
 
 class SearchExecutorTests(unittest.TestCase):
-    def test_first_real_search_is_exactly_personne_morale_wilaya_only(self) -> None:
+    def test_first_real_search_is_exactly_personne_morale_activity_and_joint_commune_wilaya(self) -> None:
         criteria = criteria_from_mapping({
             "mode": "PERSONNE_MORALE",
-            "commune_wilaya": "34000 : BORDJ BOU ARRERIDJ",
+            "activite": "442102",
+            "commune_wilaya": "34000",
         })
         validate_first_controlled_search(criteria)
         driver = FakeSearchDriver()
         executor = SearchExecutor(driver)
 
-        result = executor.execute(criteria, confirmed=True, on_step=driver.steps.append)
+        diagnostics: list[dict[str, object]] = []
+        result = executor.execute(
+            criteria, confirmed=True, on_step=driver.steps.append, on_pre_submit=diagnostics.append
+        )
 
         self.assertEqual(driver.selected_mode, [SearchMode.PERSONNE_MORALE])
-        self.assertEqual(driver.autocomplete_selected, [0])
+        self.assertEqual(driver.autocomplete_selected, [0, 0])
         self.assertEqual(driver.submissions, 1)
         self.assertEqual(executor.submission_count, 1)
         self.assertEqual(result.result_count, 17)
         self.assertEqual(result.columns, ("Dénomination", "Wilaya", "État"))
         self.assertIn(SearchStep.SUBMITTING, driver.steps)
+        self.assertIn(SearchStep.SUBMITTED, driver.steps)
         self.assertIn(SearchStep.OBSERVING_RESULTS, driver.steps)
+        self.assertIn(SearchStep.RESULTS_DETECTED, driver.steps)
+        self.assertEqual(set(diagnostics[0]["criteria"]), {"activite", "commune_wilaya"})
+        self.assertFalse(diagnostics[0]["sensitive_values_saved"])
+        self.assertFalse(diagnostics[0]["cookies_saved"])
+        self.assertFalse(diagnostics[0]["tokens_saved"])
 
     def test_personne_physique_and_morale_text_modes_use_existing_mapping(self) -> None:
         cases = (
@@ -287,11 +310,13 @@ class SearchExecutorTests(unittest.TestCase):
 
     def test_confirmation_is_required_before_mode_or_form_interactions(self) -> None:
         criteria = criteria_from_mapping({"mode": "PERSONNE_PHYSIQUE", "nom": "Test"})
-        driver = FakeSearchDriver()
-        with self.assertRaises(SearchExecutionError):
-            SearchExecutor(driver).execute(criteria, confirmed=False)
-        self.assertEqual(driver.selected_mode, [])
-        self.assertEqual(driver.submissions, 0)
+        for invalid_confirmation in (False, None, 1, "yes"):
+            with self.subTest(confirmed=invalid_confirmation):
+                driver = FakeSearchDriver()
+                with self.assertRaises(SearchExecutionError):
+                    SearchExecutor(driver).execute(criteria, confirmed=invalid_confirmation)
+                self.assertEqual(driver.selected_mode, [])
+                self.assertEqual(driver.submissions, 0)
 
     def test_missing_or_non_exact_autocomplete_suggestion_stops_before_submit(self) -> None:
         criteria = criteria_from_mapping({
@@ -300,6 +325,17 @@ class SearchExecutorTests(unittest.TestCase):
         })
         driver = FakeSearchDriver()
         driver.autocomplete_suggestions = ("34000 : AUTRE WILAYA",)
+        with self.assertRaises(SearchSuggestionMissing):
+            SearchExecutor(driver).execute(criteria, confirmed=True)
+        self.assertEqual(driver.submissions, 0)
+        self.assertEqual(driver.autocomplete_resets, ["token"])
+
+    def test_ambiguous_duplicate_exact_autocomplete_suggestions_stop_without_submit(self) -> None:
+        criteria = criteria_from_mapping({
+            "mode": "PERSONNE_MORALE", "commune_wilaya": "34000"
+        })
+        driver = FakeSearchDriver()
+        driver.autocomplete_suggestions = ("34000", "34000")
         with self.assertRaises(SearchSuggestionMissing):
             SearchExecutor(driver).execute(criteria, confirmed=True)
         self.assertEqual(driver.submissions, 0)
@@ -322,11 +358,13 @@ class SearchExecutorTests(unittest.TestCase):
 
     def test_form_ambiguity_existing_values_and_unexpected_navigation_stop_safely(self) -> None:
         criteria = criteria_from_mapping({"mode": "PERSONNE_MORALE", "raison_sociale": "Test"})
-        for setup in ("nonempty", "button_ambiguous", "disabled_button", "navigation"):
+        for setup in ("nonempty", "button_absent", "button_ambiguous", "disabled_button", "navigation"):
             with self.subTest(setup=setup):
                 driver = FakeSearchDriver()
                 if setup == "nonempty":
                     driver.all_empty = False
+                elif setup == "button_absent":
+                    driver.button_count = 0
                 elif setup == "button_ambiguous":
                     driver.button_count = 2
                 elif setup == "disabled_button":
@@ -336,6 +374,33 @@ class SearchExecutorTests(unittest.TestCase):
                 with self.assertRaises(SearchExecutionError):
                     SearchExecutor(driver).execute(criteria, confirmed=True)
                 self.assertEqual(driver.submissions, 0)
+
+    def test_missing_criterion_control_and_ambiguous_form_stop_without_submit(self) -> None:
+        criteria = criteria_from_mapping({
+            "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000"
+        })
+        for setup in ("missing_control", "ambiguous_form"):
+            with self.subTest(setup=setup):
+                driver = FakeSearchDriver()
+                if setup == "missing_control":
+                    driver.missing_control = "activite"
+                else:
+                    driver.ambiguous_form = True
+                with self.assertRaises(SearchExecutionError):
+                    SearchExecutor(driver).execute(criteria, confirmed=True)
+                self.assertEqual(driver.submissions, 0)
+
+    def test_pre_submit_diagnostic_failure_aborts_before_click(self) -> None:
+        criteria = criteria_from_mapping({
+            "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000"
+        })
+        driver = FakeSearchDriver()
+        with self.assertRaises(SearchExecutionError):
+            SearchExecutor(driver).execute(
+                criteria, confirmed=True,
+                on_pre_submit=lambda _diagnostic: (_ for _ in ()).throw(RuntimeError("disk failure")),
+            )
+        self.assertEqual(driver.submissions, 0)
 
     def test_structural_diagnostic_covers_no_results_pagination_columns_and_errors_only(self) -> None:
         criteria = criteria_from_mapping({
@@ -354,6 +419,8 @@ class SearchExecutorTests(unittest.TestCase):
             no_results=True,
             errors=("Erreur de simulation",),
             session_expired=False,
+            result_zone_found=True,
+            result_zone_tag="main",
         )
         result = SearchExecutor(driver).execute(criteria, confirmed=True)
         report = result.to_mapping()
@@ -362,6 +429,8 @@ class SearchExecutorTests(unittest.TestCase):
         self.assertEqual(report["columns"], ["Dénomination", "Wilaya"])
         self.assertTrue(report["no_results"])
         self.assertEqual(report["errors"], ["Erreur de simulation"])
+        self.assertTrue(report["result_zone_found"])
+        self.assertEqual(report["result_zone_tag"], "main")
         self.assertFalse(report["automatic_pagination"])
         self.assertFalse(report["company_rows_collected"])
         self.assertFalse(report["details_opened"])
@@ -390,21 +459,43 @@ class SearchExecutorTests(unittest.TestCase):
         self.assertEqual(driver.submissions, 1)
         self.assertEqual(executor.submission_count, 1)
 
-    def test_first_search_policy_rejects_any_additional_criterion_or_wrong_mode(self) -> None:
+    def test_first_search_policy_accepts_only_exact_personne_morale_pair(self) -> None:
+        allowed = criteria_from_mapping({
+            "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000"
+        })
+        validate_first_controlled_search(allowed)
         outside_scope = (
             criteria_from_mapping({
-                "mode": "PERSONNE_MORALE",
-                "commune_wilaya": "34000 : BORDJ BOU ARRERIDJ",
+                "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000",
                 "raison_sociale": "Test",
             }),
             criteria_from_mapping({
-                "mode": "PERSONNE_PHYSIQUE",
-                "commune_wilaya": "34000 : BORDJ BOU ARRERIDJ",
+                "mode": "PERSONNE_PHYSIQUE", "activite": "442102", "commune_wilaya": "34000",
             }),
+            criteria_from_mapping({
+                "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000 : BORDJ BOU ARRERIDJ",
+            }),
+            criteria_from_mapping({
+                "mode": "PERSONNE_MORALE", "activite": "442103", "commune_wilaya": "34000",
+            }),
+            criteria_from_mapping({"mode": "PERSONNE_MORALE", "commune_wilaya": "34000"}),
         )
         for criteria in outside_scope:
-            with self.assertRaises(SearchExecutionError):
-                validate_first_controlled_search(criteria)
+            with self.subTest(criteria=criteria):
+                with self.assertRaises(SearchExecutionError):
+                    validate_first_controlled_search(criteria)
+
+    def test_post_submit_observation_failure_is_not_retried(self) -> None:
+        criteria = criteria_from_mapping({
+            "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000"
+        })
+        driver = FakeSearchDriver()
+        driver.observation_error = True
+        executor = SearchExecutor(driver)
+        with self.assertRaises(SearchExecutionError):
+            executor.execute(criteria, confirmed=True)
+        self.assertEqual(driver.submissions, 1)
+        self.assertEqual(executor.submission_count, 1)
 
 
 if __name__ == "__main__":

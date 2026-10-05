@@ -1303,6 +1303,7 @@ class PlaywrightBrowser:
         *,
         confirmed: bool = False,
         on_step: Callable[[SearchStep], None] | None = None,
+        on_pre_submit: Callable[[dict[str, object]], None] | None = None,
     ) -> SearchObservation:
         if self._page is None or self._page.is_closed() or self._autocomplete_tester is None:
             raise SearchExecutionError("Navigateur Sidjilcom indisponible.", code="browser_unavailable")
@@ -1314,7 +1315,19 @@ class PlaywrightBrowser:
             self._autocomplete_tester,
             timeout_ms=config.navigation_timeout_ms,
         )
-        return SearchExecutor(driver).execute(criteria, confirmed=confirmed, on_step=on_step)
+        return SearchExecutor(driver).execute(
+            criteria, confirmed=confirmed, on_step=on_step, on_pre_submit=on_pre_submit
+        )
+
+    def diagnose_search_results(self, config: SessionConfig) -> SearchObservation:
+        """Lit les métadonnées structurelles de la page courante sans soumettre ni naviguer."""
+        if self._page is None or self._page.is_closed():
+            raise SearchExecutionError("Navigateur Sidjilcom indisponible.", code="browser_unavailable")
+        driver = PlaywrightSearchDriver(
+            self._page, config.url, lambda _mode: None, self._autocomplete_tester,
+            timeout_ms=config.navigation_timeout_ms,
+        )
+        return driver.observe_results()
 
     def prepare_autocomplete_test(
         self, config: SessionConfig, field_id: str, query: str

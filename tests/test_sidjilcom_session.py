@@ -27,6 +27,7 @@ from sidjily.sidjilcom.session import (
     NavigationElementNotFound,
     SessionExpiredError,
     SessionNotConnected,
+    SessionOperationError,
     SessionState,
     SidjilcomSessionManager,
     classify_session,
@@ -58,6 +59,7 @@ class FakeBrowser:
         self.autocomplete_select_calls = 0
         self.autocomplete_reset_calls = 0
         self.real_search_calls = 0
+        self.result_diagnostic_calls = 0
         self.navigation_evidence = PageEvidence(True, False, False, False, True)
         self.dashboard_evidence = PageEvidence(True, False, False, False, False, True)
         self.page_diagnostics = PageDiagnostics(
@@ -129,6 +131,21 @@ class FakeBrowser:
         self.autocomplete_reset_calls += 1
         return "simulated-reset"
 
+    def diagnose_search_results(self, _config: SessionConfig) -> SearchObservation:
+        self.result_diagnostic_calls += 1
+        return SearchObservation(
+            title="Résultat simulé",
+            sanitized_url=f"https://sidjilcom.cnrc.dz{DEFAULT_ENTERPRISE_SEARCH_ROUTE}",
+            result_count=None,
+            table_count=1,
+            row_count=0,
+            columns=("Dénomination",),
+            pagination_visible=False,
+            no_results=False,
+            errors=(),
+            session_expired=False,
+        )
+
     def execute_search(
         self,
         _config: SessionConfig,
@@ -136,6 +153,7 @@ class FakeBrowser:
         *,
         confirmed: bool = False,
         on_step: object = None,
+        on_pre_submit: object = None,
     ) -> SearchObservation:
         self.real_search_calls += 1
         if not confirmed:
@@ -423,6 +441,18 @@ class SessionManagerTests(unittest.TestCase):
                 manager.prepare_autocomplete_test("activite", "test").result(timeout=1)
             self.assertEqual(browser.autocomplete_prepare_calls, 0)
 
+    def test_real_search_is_rejected_without_a_connected_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser = FakeBrowser()
+            manager = self.make_manager(browser, temp_dir)
+            criteria = criteria_from_mapping({
+                "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000"
+            })
+            with self.assertRaises(SessionOperationError):
+                manager.execute_search(criteria, confirmed=True).result(timeout=1)
+            self.assertEqual(browser.real_search_calls, 0)
+            manager.close()
+
     def test_real_search_requires_confirmation_and_first_scenario_policy(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             browser = FakeBrowser(PageEvidence(True, False, True, False, True))
@@ -432,7 +462,8 @@ class SessionManagerTests(unittest.TestCase):
             self.wait_for_state(manager, SessionState.CONNECTED)
             criteria = criteria_from_mapping({
                 "mode": "PERSONNE_MORALE",
-                "commune_wilaya": "34000 : BORDJ BOU ARRERIDJ",
+                "activite": "442102",
+                "commune_wilaya": "34000",
             })
             with self.assertRaises(SearchNotConfirmed):
                 manager.execute_search(criteria, confirmed=False).result(timeout=1)
@@ -446,6 +477,18 @@ class SessionManagerTests(unittest.TestCase):
             result = manager.execute_search(criteria, confirmed=True).result(timeout=1)
             self.assertTrue(result.no_results)
             self.assertEqual(browser.real_search_calls, 1)
+
+    def test_follow_up_result_diagnostic_is_read_only_and_does_not_call_search(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser = FakeBrowser(PageEvidence(True, False, True, False, True))
+            manager = self.make_manager(browser, temp_dir)
+            manager.connect()
+            self.assertTrue(browser.opened.wait(1))
+            self.wait_for_state(manager, SessionState.CONNECTED)
+            result = manager.diagnose_search_results().result(timeout=1)
+            self.assertEqual(result.table_count, 1)
+            self.assertEqual(browser.result_diagnostic_calls, 1)
+            self.assertEqual(browser.real_search_calls, 0)
 
     def test_search_mode_analysis_requires_authenticated_search_page_and_never_submits(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

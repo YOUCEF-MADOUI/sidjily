@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def utc_now() -> str:
@@ -113,7 +113,12 @@ class Database:
                         value_json TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     );
-                    PRAGMA user_version = 2;
+                    CREATE TABLE controlled_search_claim (
+                        claim_id INTEGER PRIMARY KEY CHECK (claim_id = 1),
+                        search_id TEXT NOT NULL UNIQUE REFERENCES searches(id) ON DELETE RESTRICT,
+                        claimed_at TEXT NOT NULL
+                    );
+                    PRAGMA user_version = 3;
                     """
                 )
             elif version == 1:
@@ -122,6 +127,24 @@ class Database:
                 )
                 connection.execute("ALTER TABLE searches ADD COLUMN result_summary_json TEXT")
                 connection.execute("PRAGMA user_version = 2")
+                version = 2
+            if version == 2:
+                connection.execute(
+                    "CREATE TABLE controlled_search_claim ("
+                    "claim_id INTEGER PRIMARY KEY CHECK (claim_id = 1), "
+                    "search_id TEXT NOT NULL UNIQUE REFERENCES searches(id) ON DELETE RESTRICT, "
+                    "claimed_at TEXT NOT NULL)"
+                )
+                has_tasks = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks'"
+                ).fetchone()
+                if has_tasks:
+                    connection.execute(
+                        "INSERT OR IGNORE INTO controlled_search_claim(claim_id, search_id, claimed_at) "
+                        "SELECT 1, search_id, created_at FROM tasks "
+                        "WHERE task_type = 'sidjilcom_controlled_search' ORDER BY created_at LIMIT 1"
+                    )
+                connection.execute("PRAGMA user_version = 3")
 
     @staticmethod
     def add_event(

@@ -139,7 +139,7 @@ class TaskManagerTests(unittest.TestCase):
     def test_controlled_search_persists_step_state_error_free_summary_and_never_retries(self) -> None:
         search = self.manager.create_controlled_search(
             "Test structurel",
-            {"mode": "PERSONNE_MORALE", "commune_wilaya": "34000 : BORDJ BOU ARRERIDJ"},
+            {"mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000"},
         )
         self.assertEqual(search.step, "prepared")
         self.assertIsNone(search.result_summary)
@@ -148,10 +148,30 @@ class TaskManagerTests(unittest.TestCase):
         self.assertEqual(task.attempts, 1)
         self.manager.update_controlled_search_step(search.id, "filling_criteria")
         self.assertEqual(self.manager.get_search(search.id).step, "filling_criteria")
+        self.manager.update_controlled_search_pre_submit_diagnostic(search.id, {
+            "kind": "sidjilcom_pre_submit_diagnostic",
+            "mode": "PERSONNE_MORALE",
+            "criteria": ["activite", "commune_wilaya"],
+            "controls": [
+                {"criterion": "activite", "tag": "input", "type": "text", "visible": True,
+                 "enabled": True, "empty_before_fill": True}
+            ],
+            "all_visible_controls_empty_before_fill": True,
+            "search_button_count": 1,
+            "search_button_enabled": True,
+            "sensitive_values_saved": False,
+            "cookies_saved": False,
+            "tokens_saved": False,
+            "session_identifiers_saved": False,
+            "untrusted_extra": "must be discarded",
+        })
+        self.assertEqual(self.manager.get_search(search.id).result_summary["pre_submit_diagnostic"]["kind"], "sidjilcom_pre_submit_diagnostic")
+        self.assertNotIn("untrusted_extra", self.manager.get_search(search.id).result_summary["pre_submit_diagnostic"])
         self.manager.complete_controlled_search(search.id, {
             "title": "Résultats",
             "url": "https://sidjilcom.cnrc.dz/fr/group/sidjilcom/repertoire-des-commercants",
             "result_count": 4,
+            "no_results": False,
             "table_count": 1,
             "row_count": 4,
             "columns": ["Dénomination"],
@@ -161,9 +181,12 @@ class TaskManagerTests(unittest.TestCase):
         })
         restored = self.manager.get_search(search.id)
         self.assertEqual(restored.status, Status.COMPLETED)
-        self.assertEqual(restored.step, "completed")
+        self.assertEqual(restored.step, "results_detected")
         self.assertEqual(restored.result_summary["row_count"], 4)
+        self.assertIn("pre_submit_diagnostic", restored.result_summary)
         self.assertEqual(self.manager.list_tasks(search.id)[0].result_count, 4)
+        with self.assertRaises(InvalidTransition):
+            self.manager.create_controlled_search("Double soumission", search.criteria)
         with self.assertRaises(InvalidTransition):
             self.manager.start_controlled_search(search.id)
 
@@ -182,6 +205,88 @@ class TaskManagerTests(unittest.TestCase):
             self.manager.resume_search(search.id)
         with self.assertRaises(InvalidTransition):
             self.manager.start_controlled_search(search.id)
+        self.manager.create_controlled_search("Nouvel essai manuel après échec pré-soumission", {"mode": "PERSONNE_MORALE"})
+
+    def test_controlled_submission_failure_is_result_unknown_and_follow_up_is_read_only(self) -> None:
+        search = self.manager.create_controlled_search(
+            "Test inconnu", {"mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000"}
+        )
+        self.manager.start_controlled_search(search.id)
+        self.manager.update_controlled_search_step(search.id, "submitting")
+        self.manager.update_controlled_search_step(search.id, "submitted")
+        self.manager.update_controlled_search_step(search.id, "observing_results")
+        self.manager.fail_controlled_search(search.id, "Diagnostic des résultats impossible.")
+        failed = self.manager.get_search(search.id)
+        self.assertEqual(failed.step, "result_unknown")
+        self.assertIn("résultat est inconnu", failed.last_error)
+        with self.assertRaises(InvalidTransition):
+            self.manager.resume_search(search.id)
+        with self.assertRaises(InvalidTransition):
+            self.manager.start_controlled_search(search.id)
+        with self.assertRaises(InvalidTransition):
+            self.manager.create_controlled_search("Double soumission", search.criteria)
+
+        diagnostic = {
+            "title": "Résultats",
+            "url": "https://sidjilcom.cnrc.dz/fr/group/sidjilcom/repertoire-des-commercants?token=secret",
+            "table_count": 1,
+            "company_name": "must not persist",
+        }
+        self.manager.store_unknown_search_diagnostic(search.id, diagnostic)
+        restored = self.manager.get_search(search.id)
+        self.assertEqual(restored.step, "result_unknown")
+        self.assertEqual(restored.result_summary["follow_up_structural_diagnostic"]["title"], "Résultats")
+        self.assertNotIn("company_name", restored.result_summary["follow_up_structural_diagnostic"])
+        self.assertNotIn("token=secret", restored.result_summary["follow_up_structural_diagnostic"]["url"])
+        self.assertEqual(self.manager.list_tasks(search.id)[0].attempts, 1)
+        self.assertIn("aucune nouvelle recherche soumise", self.manager.list_events(search.id)[-1]["message"])
+
+    def test_interrupted_controlled_search_is_never_requeued_and_submit_stage_becomes_unknown(self) -> None:
+        search = self.manager.create_controlled_search("Interrompue", {"mode": "PERSONNE_MORALE"})
+        self.manager.start_controlled_search(search.id)
+        self.manager.update_controlled_search_step(search.id, "submitting")
+        restarted = TaskManager(Database(self.database_path))
+        self.assertEqual(restarted.recover_interrupted(), 1)
+        restored = restarted.get_search(search.id)
+        task = restarted.list_tasks(search.id)[0]
+        self.assertEqual(restored.status, Status.FAILED)
+        self.assertEqual(restored.step, "result_unknown")
+        self.assertEqual(task.status, Status.FAILED)
+        self.assertEqual(task.attempts, 1)
+        with self.assertRaises(InvalidTransition):
+            restarted.resume_search(search.id)
+        with self.assertRaises(InvalidTransition):
+            restarted.start_controlled_search(search.id)
+        with self.assertRaises(InvalidTransition):
+            restarted.create_controlled_search("Ne pas relancer", search.criteria)
+
+    def test_zero_result_observation_persists_no_results_terminal_step(self) -> None:
+        search = self.manager.create_controlled_search("Aucun résultat", {"mode": "PERSONNE_MORALE"})
+        self.manager.start_controlled_search(search.id)
+        self.manager.update_controlled_search_step(search.id, "submitted")
+        self.manager.complete_controlled_search(search.id, {
+            "title": "Recherche", "url": "https://sidjilcom.cnrc.dz/fr/group/sidjilcom/repertoire-des-commercants",
+            "result_count": 0, "table_count": 0, "row_count": 0, "columns": [],
+            "pagination_visible": False, "no_results": True, "errors": [], "session_expired": False,
+        })
+        self.assertEqual(self.manager.get_search(search.id).step, "no_results")
+        with self.assertRaises(InvalidTransition):
+            self.manager.create_controlled_search("Pas de doublon", {"mode": "PERSONNE_MORALE"})
+
+    def test_confirmed_draft_is_promoted_atomically_into_single_attempt(self) -> None:
+        criteria = {"mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000"}
+        draft = self.manager.create_draft("Draft", criteria, {"submitted": False})
+        promoted = self.manager.promote_draft_to_controlled_search(draft.id, "Test confirmé", criteria)
+        self.assertEqual(promoted.id, draft.id)
+        self.assertFalse(self.manager.is_draft(draft.id))
+        self.assertEqual(promoted.criteria, criteria)
+        self.assertIsNone(promoted.result_summary)
+        self.manager.start_controlled_search(promoted.id)
+        with self.assertRaises(KeyError):
+            self.manager.promote_draft_to_controlled_search(draft.id, "Encore", criteria)
+        another = self.manager.create_draft("Deuxième brouillon", criteria, {"submitted": False})
+        with self.assertRaises(InvalidTransition):
+            self.manager.promote_draft_to_controlled_search(another.id, "Tentative en trop", criteria)
 
     def test_schema_v1_migration_adds_controlled_search_metadata_without_dropping_rows(self) -> None:
         legacy_path = Path(self.temp_dir.name) / "legacy.sqlite3"
@@ -203,7 +308,7 @@ class TaskManagerTests(unittest.TestCase):
             columns = {row["name"] for row in migrated.execute("PRAGMA table_info(searches)")}
             version = migrated.execute("PRAGMA user_version").fetchone()[0]
             preserved = migrated.execute("SELECT id, step, result_summary_json FROM searches").fetchone()
-        self.assertEqual(version, 2)
+        self.assertEqual(version, 3)
         self.assertTrue({"step", "result_summary_json"}.issubset(columns))
         self.assertEqual(tuple(preserved), ("legacy-id", "created", None))
 

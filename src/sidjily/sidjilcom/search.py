@@ -36,7 +36,10 @@ class SearchStep(str, Enum):
     FORM_VALIDATION = "form_validation"
     FILLING_CRITERIA = "filling_criteria"
     SUBMITTING = "submitting"
+    SUBMITTED = "submitted"
     OBSERVING_RESULTS = "observing_results"
+    RESULTS_DETECTED = "results_detected"
+    NO_RESULTS = "no_results"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -122,6 +125,8 @@ class SearchObservation:
     no_results: bool
     errors: tuple[str, ...]
     session_expired: bool
+    result_zone_found: bool = False
+    result_zone_tag: str = ""
 
     def to_mapping(self) -> dict[str, object]:
         return {
@@ -135,6 +140,8 @@ class SearchObservation:
             "no_results": self.no_results,
             "errors": list(self.errors),
             "session_expired": self.session_expired,
+            "result_zone_found": self.result_zone_found,
+            "result_zone_tag": self.result_zone_tag,
             "details_opened": False,
             "automatic_pagination": False,
             "company_rows_collected": False,
@@ -196,13 +203,14 @@ class SearchExecutor:
         *,
         confirmed: bool = False,
         on_step: Callable[[SearchStep], None] | None = None,
+        on_pre_submit: Callable[[dict[str, object]], None] | None = None,
     ) -> SearchObservation:
-        if not confirmed:
+        if confirmed is not True:
             raise SearchNotConfirmed()
         try:
             validate_search_criteria(criteria)
             mapped = map_criteria_to_controls(criteria)
-        except CriteriaValidationError:
+        except (CriteriaValidationError, AttributeError, TypeError):
             raise SearchCriteriaNotSupported() from None
         if not mapped:
             raise SearchCriteriaNotSupported()
@@ -275,11 +283,20 @@ class SearchExecutor:
 
         if self._driver.page_marker() != marker:
             raise SearchNavigationUnexpected()
+        if on_pre_submit is not None:
+            try:
+                on_pre_submit(self._pre_submit_diagnostic(criteria.mode, form))
+            except Exception:
+                raise SearchExecutionError(
+                    "Le diagnostic préalable n'a pas pu être enregistré; la recherche n'a pas été soumise.",
+                    code="pre_submit_diagnostic_failed",
+                ) from None
         self._emit(on_step, SearchStep.SUBMITTING)
         try:
             # C'est l'unique point de soumission; aucun retry n'existe dans l'orchestrateur.
             self._driver.submit_search(form)
             self.submission_count += 1
+            self._emit(on_step, SearchStep.SUBMITTED)
         except SearchExecutionError:
             raise
         except Exception:
@@ -296,7 +313,39 @@ class SearchExecutor:
             raise SearchSessionExpired()
         if not result.sanitized_url.startswith("https://") or not result.sanitized_url:
             raise SearchNavigationUnexpected()
+        self._emit(
+            on_step,
+            SearchStep.NO_RESULTS if result.no_results or result.result_count == 0
+            else SearchStep.RESULTS_DETECTED,
+        )
         return result
+
+    @staticmethod
+    def _pre_submit_diagnostic(mode: SearchMode, form: SearchFormSnapshot) -> dict[str, object]:
+        """Métadonnées non sensibles uniquement; aucun champ, URL, cookie ou token."""
+        return {
+            "kind": "sidjilcom_pre_submit_diagnostic",
+            "mode": mode.value,
+            "criteria": [control.criterion for control in form.controls],
+            "controls": [
+                {
+                    "criterion": control.criterion,
+                    "tag": control.tag_name,
+                    "type": control.input_type,
+                    "visible": control.visible,
+                    "enabled": control.enabled,
+                    "empty_before_fill": control.empty,
+                }
+                for control in form.controls
+            ],
+            "all_visible_controls_empty_before_fill": form.all_visible_controls_empty,
+            "search_button_count": form.search_button_count,
+            "search_button_enabled": form.search_button_enabled,
+            "sensitive_values_saved": False,
+            "cookies_saved": False,
+            "tokens_saved": False,
+            "session_identifiers_saved": False,
+        }
 
     @staticmethod
     def _emit(callback: Callable[[SearchStep], None] | None, step: SearchStep) -> None:
@@ -357,19 +406,20 @@ class SearchExecutor:
 
 
 def validate_first_controlled_search(criteria: SearchCriteria) -> None:
-    """Verrou de périmètre: premier test autorisé = personne morale + wilaya seule."""
+    """Autorise uniquement le test initial personne morale : activité 442102 + commune/wilaya 34000."""
     try:
         validate_search_criteria(criteria)
         mapped = map_criteria_to_controls(criteria)
-    except CriteriaValidationError:
+    except (CriteriaValidationError, AttributeError, TypeError):
         raise SearchCriteriaNotSupported() from None
+    expected = {"activite": "442102", "commune_wilaya": "34000"}
+    actual = {item.criterion: item.value for item in mapped}
     if (
         criteria.mode is not SearchMode.PERSONNE_MORALE
-        or len(mapped) != 1
-        or mapped[0].criterion != "commune_wilaya"
-        or mapped[0].value != "34000 : BORDJ BOU ARRERIDJ"
+        or len(mapped) != len(expected)
+        or actual != expected
     ):
         raise SearchExecutionError(
-            "Pour ce premier test, utilisez uniquement Personne morale et Wilaya = 34000 : BORDJ BOU ARRERIDJ.",
+            "Le premier test contrôlé exige Personne morale, Activité = 442102 et Commune/Wilaya = 34000 uniquement.",
             code="outside_first_search_scope",
         )

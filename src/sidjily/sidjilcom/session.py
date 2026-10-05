@@ -205,6 +205,10 @@ class SidjilcomSessionManager:
         """Analyser les deux formulaires sans saisir ni soumettre de critères."""
         return self._submit_operation("search_modes")
 
+    def diagnose_search_results(self) -> Future[SearchObservation]:
+        """Observe en lecture seule la structure du résultat affiché, sans relancer la recherche."""
+        return self._submit_operation("diagnose_search_results", require_connected=True)
+
     def diagnose_real_search_form(self, stage: str) -> Future[SessionDiagnostics]:
         """Capturer la structure du formulaire courant, strictement en lecture seule."""
         return self._submit_operation("real_form_diagnostic", stage, require_connected=True)
@@ -219,10 +223,11 @@ class SidjilcomSessionManager:
         *,
         confirmed: bool,
         on_step: Any = None,
+        on_pre_submit: Any = None,
     ) -> Future[SearchObservation]:
         """Exécute une recherche uniquement après confirmation UI explicite."""
         future: Future[SearchObservation] = Future()
-        if not confirmed:
+        if confirmed is not True:
             future.set_exception(SearchNotConfirmed())
             return future
         try:
@@ -231,7 +236,7 @@ class SidjilcomSessionManager:
             future.set_exception(exc)
             return future
         return self._submit_operation(
-            "execute_search", criteria, on_step, require_connected=True
+            "execute_search", criteria, on_step, on_pre_submit, require_connected=True
         )
 
     def select_autocomplete_suggestion(
@@ -363,12 +368,21 @@ class SidjilcomSessionManager:
                     command.future.set_result(result)
                 return
 
+            if command.name == "diagnose_search_results":
+                if self.snapshot.state != SessionState.CONNECTED:
+                    raise SessionNotConnected()
+                result = browser.diagnose_search_results(self.config)
+                if not command.future.done():
+                    command.future.set_result(result)
+                return
+
             if command.name == "execute_search":
                 if self.snapshot.state != SessionState.CONNECTED:
                     raise SessionNotConnected()
-                criteria, on_step = command.arguments
+                criteria, on_step, on_pre_submit = command.arguments
                 result = browser.execute_search(
-                    self.config, criteria, confirmed=True, on_step=on_step
+                    self.config, criteria, confirmed=True, on_step=on_step,
+                    on_pre_submit=on_pre_submit,
                 )
                 if not command.future.done():
                     command.future.set_result(result)
