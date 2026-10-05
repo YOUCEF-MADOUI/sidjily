@@ -6,6 +6,7 @@ from sidjily.sidjilcom.criteria import SearchMode, criteria_from_mapping, criter
 from sidjily.sidjilcom.preparation import (
     ADVANCED_FIELDS,
     CONFIRMED_AUTOCOMPLETE_FIELDS,
+    FIELD_LABELS,
     PREPARATION_NOTICE,
     PRIMARY_FIELDS,
     count_filled_criteria,
@@ -24,6 +25,7 @@ class SearchPreparationTests(unittest.TestCase):
             PRIMARY_FIELDS[SearchMode.PERSONNE_MORALE],
             ("raison_sociale", "forme_juridique", "activite", "commune_wilaya"),
         )
+        self.assertEqual(FIELD_LABELS["activite"], "Activité / Code activité")
         self.assertIn("secteur_activite", ADVANCED_FIELDS[SearchMode.PERSONNE_MORALE])
         self.assertIn("nom_prenom_dirigeant", ADVANCED_FIELDS[SearchMode.PERSONNE_MORALE])
 

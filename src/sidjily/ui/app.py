@@ -135,19 +135,19 @@ class SidjilyApp:
         search_panel.pack(fill="x", pady=(0, 10))
         ttk.Label(
             search_panel,
-            text="Le navigateur dédié est vérifié et amené sur la recherche Sidjilcom avant l'ouverture des critères.",
+            text="Trouver une entreprise vérifie la session et ouvre le portail; Nouvelle recherche ouvre directement le formulaire SIDJILY.",
             wraplength=850,
         ).pack(anchor="w", pady=(0, 8))
         search_buttons = ttk.Frame(search_panel)
         search_buttons.pack(fill="x")
-        self.new_search_button = ttk.Button(
-            search_buttons, text="Nouvelle recherche", command=self.new_search
-        )
-        self.new_search_button.pack(side="left")
         self.enterprise_search_button = ttk.Button(
             search_buttons, text="Trouver une entreprise", command=self._open_enterprise_search
         )
-        self.enterprise_search_button.pack(side="left", padx=8)
+        self.enterprise_search_button.pack(side="left")
+        self.new_search_button = ttk.Button(
+            search_buttons, text="Nouvelle recherche", command=self.new_search
+        )
+        self.new_search_button.pack(side="left", padx=8)
         self.continue_button = ttk.Button(
             search_buttons, text="Continuer la recherche", command=self.resume_selected
         )
@@ -307,8 +307,8 @@ class SidjilyApp:
             self.details.configure(text="Sélectionnez une recherche pour afficher son journal.")
 
     def new_search(self) -> None:
-        """Vérifie la session et ouvre le formulaire Sidjilcom avant la préparation locale."""
-        self._begin_preparation()
+        """Ouvre directement le formulaire local, sans navigation Sidjilcom."""
+        self._open_preparation_dialog()
 
     def _begin_preparation(self, draft: Search | None = None) -> None:
         snapshot = self.session_manager.snapshot
@@ -332,22 +332,30 @@ class SidjilyApp:
         )
 
     def _open_preparation_dialog(self, draft: Search | None = None) -> None:
-        dialog = _NewSearchDialog(self.root, initial_search=draft)
-        self.root.wait_window(dialog.window)
-        if dialog.result is None:
-            return
-        name, criteria = dialog.result
-        criteria_mapping = criteria_to_mapping(criteria)
-        summary = draft_summary_record(criteria)
-        if dialog.draft_id:
-            saved_search = self.manager.update_draft(dialog.draft_id, name, criteria_mapping, summary)
-            saved_message = "Brouillon mis à jour localement. Aucun envoi à Sidjilcom n'a été effectué."
-        else:
-            saved_search = self.manager.create_draft(name, criteria_mapping, summary)
-            saved_message = "Brouillon enregistré localement. Aucune recherche n'a été envoyée à Sidjilcom."
-        self.selected_search_id = saved_search.id
-        self.refresh()
-        self.footer.configure(text=saved_message)
+        try:
+            dialog = _NewSearchDialog(self.root, initial_search=draft)
+            self.root.wait_window(dialog.window)
+            if dialog.result is None:
+                return
+            name, criteria = dialog.result
+            criteria_mapping = criteria_to_mapping(criteria)
+            summary = draft_summary_record(criteria)
+            if dialog.draft_id:
+                saved_search = self.manager.update_draft(dialog.draft_id, name, criteria_mapping, summary)
+                saved_message = "Brouillon mis à jour localement. Aucun envoi à Sidjilcom n'a été effectué."
+            else:
+                saved_search = self.manager.create_draft(name, criteria_mapping, summary)
+                saved_message = "Brouillon enregistré localement. Aucune recherche n'a été envoyée à Sidjilcom."
+            self.selected_search_id = saved_search.id
+            self.refresh()
+            self.footer.configure(text=saved_message)
+        except Exception:
+            messagebox.showerror(
+                "Préparateur indisponible",
+                "SIDJILY n'a pas pu ouvrir ou enregistrer le formulaire de préparation. "
+                "Aucune recherche réelle n'a été envoyée.",
+                parent=self.root,
+            )
 
     def new_real_search(self) -> None:
         if self.session_manager.snapshot.state != SessionState.CONNECTED:
@@ -587,6 +595,12 @@ class SidjilyApp:
             if navigation_action == "prepare":
                 self._pending_preparation_draft = None
                 self.footer.configure(text=f"Navigation impossible; aucune recherche envoyée. {message}")
+                messagebox.showwarning(
+                    "Recherche Sidjilcom non confirmée",
+                    f"La page de recherche n'a pas pu être confirmée. {message}\n\n"
+                    "Vérifiez la session puis réessayez. Aucune recherche n'a été envoyée.",
+                    parent=self.root,
+                )
             elif "DIAGNOSTIC DE DÉTECTION DES MODES" in message:
                 self._set_diagnostic_report(message)
                 self.diagnostic_output.configure(
@@ -793,7 +807,7 @@ class _NewSearchDialog:
         self.window = tk.Toplevel(parent)
         self.window.title(
             "Première recherche réelle — confirmation requise"
-            if launch_mode else "Nouvelle recherche — préparation Sidjilcom"
+            if launch_mode else "Préparer une recherche"
         )
         self.window.transient(parent)
         self.window.grab_set()
@@ -821,7 +835,7 @@ class _NewSearchDialog:
         frame.pack(fill="both", expand=True)
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(3, weight=1)
-        ttk.Label(frame, text="Nouvelle recherche", font=("Segoe UI", 16, "bold")).grid(
+        ttk.Label(frame, text="Préparer une recherche", font=("Segoe UI", 16, "bold")).grid(
             row=0, column=0, sticky="w", pady=(0, 3)
         )
         ttk.Label(
@@ -842,7 +856,7 @@ class _NewSearchDialog:
         ttk.Entry(identity, textvariable=self.name, width=38).grid(
             row=0, column=1, sticky="ew", padx=(0, 18)
         )
-        ttk.Label(identity, text="Mode obligatoire").grid(row=0, column=2, sticky="w", padx=(0, 8))
+        ttk.Label(identity, text="Type de recherche (obligatoire)").grid(row=0, column=2, sticky="w", padx=(0, 8))
         self.mode_box = ttk.Combobox(
             identity,
             textvariable=self.mode,

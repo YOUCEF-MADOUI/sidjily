@@ -53,7 +53,7 @@ CONFIRMED_AUTOCOMPLETE_FIELDS = frozenset(
 FIELD_LABELS: dict[str, str] = {
     "nom": "Nom",
     "prenom": "Prénom",
-    "activite": "Activité",
+    "activite": "Activité / Code activité",
     "commune_wilaya": "Wilaya / Commune",
     "nationalite": "Nationalité",
     "raison_sociale": "Raison sociale",

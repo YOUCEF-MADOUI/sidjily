@@ -43,8 +43,27 @@ class SearchPreparationUiContractTests(unittest.TestCase):
     def test_real_search_button_in_preparation_is_informational(self) -> None:
         dialog_node, _source = class_source("_NewSearchDialog")
         _init_node, init_source = method_source(dialog_node, "__init__")
+        self.assertIn('if launch_mode else "Préparer une recherche"', init_source)
         self.assertIn('text="Lancer la recherche"', init_source)
         self.assertIn('command=self._explain_execution_not_available', init_source)
+
+    def test_new_find_and_continue_actions_share_one_preparation_dialog(self) -> None:
+        app_node, _source = class_source("SidjilyApp")
+        _new_node, new_source = method_source(app_node, "new_search")
+        _continue_node, continue_source = method_source(app_node, "resume_selected")
+        _consume_node, consume_source = method_source(app_node, "_consume_session_operation")
+        _find_node, find_source = method_source(app_node, "_open_enterprise_search")
+        dialog_classes = [
+            node for node in APP_TREE.body
+            if isinstance(node, ast.ClassDef) and node.name == "_NewSearchDialog"
+        ]
+        self.assertEqual(len(dialog_classes), 1)
+        self.assertIn("self._open_preparation_dialog()", new_source)
+        self.assertNotIn("self._begin_preparation()", new_source)
+        self.assertIn("self._open_preparation_dialog(draft)", continue_source)
+        self.assertIn('self._pending_navigation_action = "prepare"', find_source)
+        self.assertIn("self.session_manager.open_enterprise_search()", find_source)
+        self.assertIn("self._open_preparation_dialog(draft)", consume_source)
 
     def test_diagnostics_are_built_in_a_collapsible_developer_area(self) -> None:
         app_node, _source = class_source("SidjilyApp")

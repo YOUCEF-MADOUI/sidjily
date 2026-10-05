@@ -25,7 +25,6 @@ from sidjily.sidjilcom.selectors import (
 )
 from sidjily.sidjilcom.session import (
     NavigationElementNotFound,
-    NavigationPageIncomplete,
     SessionExpiredError,
     SessionNotConnected,
     SessionState,
@@ -554,7 +553,7 @@ class SessionManagerTests(unittest.TestCase):
                 manager.open_enterprise_search().result(timeout=1)
             self.assertEqual(manager.snapshot.state, SessionState.CONNECTED)
 
-    def test_incomplete_search_page_is_reported(self) -> None:
+    def test_enterprise_search_route_is_accepted_when_read_only_field_detection_is_empty(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             browser = FakeBrowser(PageEvidence(True, False, True, False))
             browser.page_diagnostics = PageDiagnostics(
@@ -567,8 +566,11 @@ class SessionManagerTests(unittest.TestCase):
             manager = self.make_manager(browser, temp_dir)
             manager.connect()
             self.assertTrue(browser.opened.wait(1))
-            with self.assertRaises(NavigationPageIncomplete):
-                manager.open_enterprise_search().result(timeout=1)
+            report = manager.open_enterprise_search().result(timeout=1)
+            self.assertEqual(report.state, SessionState.CONNECTED)
+            self.assertEqual(report.page.section, "Trouver une entreprise")
+            self.assertEqual(report.page.visible_fields, ())
+            self.assertEqual(browser.search_calls, 1)
 
     def test_dashboard_navigation_uses_mock_browser_and_reports_section(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

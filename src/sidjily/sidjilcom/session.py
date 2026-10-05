@@ -432,8 +432,9 @@ class SidjilcomSessionManager:
                 raise SessionNotConnected()
             if protected_navigation and page is not None and page.section != expected_section:
                 raise NavigationElementNotFound()
-            if command.name == "enterprise_search" and page is not None and not page.visible_fields:
-                raise NavigationPageIncomplete()
+            # L'ouverture du préparateur SIDJILY dépend de la navigation et de la session,
+            # pas de la détection DOM des champs du site. Les champs peuvent ne pas être
+            # exposés par le diagnostic sans que la route de recherche soit inaccessible.
             if command.name == "search_modes":
                 page = browser.diagnose_search_modes(self.config)
                 after_state = self._classify_evidence(browser.inspect(self.config))
