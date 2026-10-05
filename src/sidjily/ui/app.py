@@ -779,6 +779,12 @@ class SidjilyApp:
             observation: SearchObservation = future.result()
         except (SearchExecutionError, SessionOperationError) as exc:
             error = str(exc)
+            structural = getattr(exc, "diagnostic", None)
+            if isinstance(structural, dict):
+                try:
+                    self.manager.store_controlled_search_failure_diagnostic(search_id, structural)
+                except Exception:
+                    pass
             self.manager.fail_controlled_search(search_id, error)
             search = self.manager.get_search(search_id)
             self.selected_search_id = search_id
@@ -788,11 +794,17 @@ class SidjilyApp:
                 "Utilisez ensuite « Diagnostiquer le résultat (lecture seule) » si la page est toujours ouverte."
                 if unknown else "Échec avant le clic Rechercher; aucune nouvelle tentative n'a été lancée."
             )
+            failure_diagnostic = (
+                search.result_summary.get("controlled_search_failure_diagnostic", {})
+                if search.result_summary else {}
+            )
+            detail_lines = self._format_controlled_search_failure_diagnostic(failure_diagnostic)
             self._set_diagnostic_report(
                 "RECHERCHE SIDJILCOM CONTRÔLÉE — arrêtée sans nouvelle tentative\n"
                 f"ID : {search_id}\nÉtape : {search.step}\n{status_line}\n"
-                f"Erreur : {error}\n\n"
-                "TEST RÉEL : un test ne peut être effectué que depuis votre PC avec votre session Sidjilcom.\n"
+                f"Erreur : {error}\n"
+                + ("\n" + "\n".join(detail_lines) if detail_lines else "")
+                + "\n\nTEST RÉEL : un test ne peut être effectué que depuis votre PC avec votre session Sidjilcom.\n"
                 "TEST RÉEL : NON EFFECTUÉ PAR ARENA."
             )
             self.diagnostic_output.configure(text=status_line)
@@ -840,6 +852,92 @@ class SidjilyApp:
             self.diagnostic_output.configure(text="Recherche terminée; seul le diagnostic structurel a été conservé.")
         self.refresh()
         self._refresh_session_status()
+
+    @staticmethod
+    def _format_controlled_search_failure_diagnostic(diagnostic: object) -> list[str]:
+        if not isinstance(diagnostic, dict):
+            return []
+        lines = [
+            "DIAGNOSTIC STRUCTUREL (aucune valeur DOM, donnée d'entreprise ou secret conservé)",
+            f"Étape de blocage : {diagnostic.get('stage') or 'inconnue'}",
+            f"Raison exacte : {diagnostic.get('reason_code') or 'inconnue'}",
+        ]
+        page = diagnostic.get("page")
+        if isinstance(page, dict):
+            lines.append(
+                f"Page : {page.get('section') or 'inconnue'} · {page.get('title') or 'sans titre'} · "
+                f"URL : {page.get('url') or 'non reconnue'}"
+            )
+        def append_fields(fields: object) -> None:
+            for field in fields if isinstance(fields, list) else []:
+                if not isinstance(field, dict):
+                    continue
+                status = (
+                    "valeur conforme" if field.get("value_matches_criterion") is True else
+                    "valeur non conforme" if field.get("value_matches_criterion") is False else
+                    "valeur non vérifiée"
+                )
+                lines.append(
+                    f"Champ {field.get('criterion') or field.get('suffix') or 'inconnu'}: "
+                    f"name={field.get('name') or '—'} · id={field.get('id') or '—'} · "
+                    f"label={field.get('label') or '—'} · role={field.get('role') or '—'} · "
+                    f"type={field.get('tag') or '—'}/{field.get('type') or '—'} · "
+                    f"class={field.get('class') or '—'} · visible={field.get('visible', 'inconnu')} · "
+                    f"disabled={field.get('disabled', 'inconnu')} · {status}"
+                )
+
+        def append_button(button: object) -> None:
+            if isinstance(button, dict) and button:
+                lines.append(
+                    "Bouton Rechercher : "
+                    f"candidats={button.get('candidate_count', 'inconnu')} · "
+                    f"visible={button.get('visible', False)} · enabled={button.get('enabled', False)} · "
+                    f"formulaire associé={button.get('associated', False)} · "
+                    f"id={button.get('id') or '—'} · role={button.get('role') or '—'} · "
+                    f"type={button.get('type') or '—'} · class={button.get('class') or '—'}"
+                )
+
+        candidate_forms = diagnostic.get("candidate_forms", [])
+        if isinstance(candidate_forms, list) and candidate_forms:
+            lines.append(f"Formulaires candidats observés : {len(candidate_forms)}")
+            for index, candidate in enumerate(candidate_forms, start=1):
+                if not isinstance(candidate, dict):
+                    continue
+                lines.append(
+                    f"Formulaire candidat {index} : id={candidate.get('id') or '—'} · "
+                    f"name={candidate.get('name') or '—'} · role={candidate.get('role') or '—'} · "
+                    f"method={candidate.get('method') or '—'} · action={candidate.get('action') or '—'} · "
+                    f"parent Recherche Commerçant={'oui' if candidate.get('parent_portlet_confirmed') else 'non'}"
+                )
+                append_fields(candidate.get("fields", []))
+                append_button(candidate.get("button", {}))
+                invalid_candidate = candidate.get("required_invalid_controls", [])
+                if isinstance(invalid_candidate, list) and invalid_candidate:
+                    lines.append("Champs obligatoires invalides : " + " · ".join(str(item) for item in invalid_candidate))
+        else:
+            form = diagnostic.get("form")
+            if isinstance(form, dict) and form:
+                lines.append(
+                    "Formulaire : "
+                    f"id={form.get('id') or '—'} · name={form.get('name') or '—'} · "
+                    f"role={form.get('role') or '—'} · method={form.get('method') or '—'} · "
+                    f"action={form.get('action') or '—'} · parent Recherche Commerçant="
+                    f"{'oui' if form.get('parent_portlet_confirmed') else 'non'}"
+                )
+            append_fields(diagnostic.get("fields", []))
+            append_button(diagnostic.get("button", {}))
+
+        autocomplete = diagnostic.get("autocomplete")
+        if isinstance(autocomplete, dict):
+            lines.append(
+                f"Autocomplete {autocomplete.get('field') or 'inconnu'} ({autocomplete.get('suffix') or '—'}): "
+                f"{autocomplete.get('suggestion_count', 0)} suggestion(s), "
+                f"{autocomplete.get('exact_code_match_count', 0)} correspondance(s) exacte(s) au code demandé."
+            )
+        invalid = diagnostic.get("required_invalid_controls", [])
+        if isinstance(invalid, list) and invalid:
+            lines.append("Champs obligatoires invalides : " + " · ".join(str(item) for item in invalid))
+        return lines
 
     def _refresh_session_status(self) -> None:
         snapshot = self.session_manager.snapshot

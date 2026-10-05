@@ -324,6 +324,52 @@ class TaskManagerTests(unittest.TestCase):
         searches = {search.id for search in restarted.list_searches()}
         self.assertEqual(searches, {abandoned.id, fresh.id})
 
+    def test_controlled_failure_diagnostic_keeps_structure_but_drops_values_and_url_secrets(self) -> None:
+        search = self.manager.create_controlled_search("Diagnostic", {
+            "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000",
+        })
+        self.manager.start_controlled_search(search.id)
+        self.manager.store_controlled_search_failure_diagnostic(search.id, {
+            "kind": "sidjilcom_controlled_search_failure",
+            "stage": "post_fill_verification",
+            "mode": "PERSONNE_MORALE",
+            "reason_code": "filled_value_mismatch",
+            "current_field": "activite",
+            "page": {
+                "url": "https://sidjilcom.cnrc.dz/fr/group/sidjilcom/repertoire-des-commercants?token=secret",
+                "title": "Recherche Commerçant", "section": "Trouver une entreprise",
+            },
+            "form": {
+                "id": "legal-search", "name": "", "class": "search-form", "role": "search",
+                "method": "POST", "action": "https://sidjilcom.cnrc.dz/search?csrf=secret",
+                "parent_portlet": "dz_cnrc_sidjilcom_recherchedetaillee_portlet_RechercheDetailleePortlet",
+                "parent_portlet_confirmed": True,
+            },
+            "fields": [{
+                "criterion": "activite", "suffix": "_activi", "name": "portlet_activi",
+                "id": "activity", "label": "Activité", "role": "combobox", "tag": "input",
+                "type": "text", "class": "yui3-aclist-input", "visible": True,
+                "disabled": False, "required": False, "has_value": True,
+                "value_matches_criterion": False, "value": "SECRET VALUE MUST NOT PERSIST",
+            }],
+            "button": {"label": "Rechercher", "id": "search", "type": "submit", "visible": True,
+                       "enabled": True, "associated": True, "candidate_count": 1},
+            "sensitive_values_saved": False, "cookies_saved": False,
+            "tokens_saved": False, "session_identifiers_saved": False,
+        })
+        saved = self.manager.get_search(search.id).result_summary["controlled_search_failure_diagnostic"]
+        encoded = self.manager.database.encode_json(saved)
+        self.assertEqual(saved["reason_code"], "filled_value_mismatch")
+        self.assertEqual(saved["fields"][0]["name"], "portlet_activi")
+        self.assertFalse(saved["fields"][0]["value_matches_criterion"])
+        self.assertEqual(saved["page"]["url"], "https://sidjilcom.cnrc.dz/fr/group/sidjilcom/repertoire-des-commercants")
+        self.assertNotIn("token=secret", encoded)
+        self.assertNotIn("csrf=secret", encoded)
+        self.assertNotIn("SECRET VALUE", encoded)
+        self.assertNotIn('"value":', encoded)
+        self.manager.fail_controlled_search(search.id, "Valeur DOM non conforme.")
+        self.assertEqual(self.manager.get_search(search.id).step, "failed_before_submission")
+
     def test_submission_event_keeps_lock_even_if_current_state_was_overwritten(self) -> None:
         search = self.manager.create_controlled_search("Trace historique", {"mode": "PERSONNE_MORALE"})
         task = self.manager.start_controlled_search(search.id)

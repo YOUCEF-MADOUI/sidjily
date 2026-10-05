@@ -48,6 +48,7 @@ from sidjily.sidjilcom.selectors import (
     identify_section,
     is_portal_host,
     sanitize_current_url,
+    SEARCH_MODE_PORTLET_MARKER,
 )
 
 
@@ -74,7 +75,6 @@ class SearchModeAnalysisError(RuntimeError):
     """Échec d'analyse des modes, avec un message qui ne reflète pas le contenu de page."""
 
 
-SEARCH_MODE_PORTLET_MARKER = "dz_cnrc_sidjilcom_recherchedetaillee_portlet_RechercheDetailleePortlet"
 SEARCH_MODE_LABELS = ("PERSONNES PHYSIQUES", "PERSONNES MORALES")
 
 

@@ -47,6 +47,7 @@ from sidjily.sidjilcom.selectors import (
     identify_section,
     is_portal_host,
     sanitize_current_url,
+    SEARCH_MODE_PORTLET_MARKER,
 )
 
 
@@ -183,10 +184,18 @@ class PlaywrightSearchDriver:
         self._active_button: Any | None = None
         self._active_mode: SearchMode | None = None
         self._active_marker = ""
+        self._submission_attempted = False
+        self._last_diagnostic: dict[str, object] = {}
 
     def select_mode(self, mode: SearchMode) -> None:
         if self._page is None or self._page.is_closed():
             raise SearchNavigationUnexpected()
+        self._last_diagnostic = {
+            "stage": "mode_selection",
+            "page": self._page_diagnostic(),
+            "forms": [],
+            "button": {"label": "Rechercher", "visible": False, "enabled": False, "associated": False},
+        }
         try:
             if self._page.evaluate(_SESSION_EXPIRY_CHECK_SCRIPT):
                 raise SearchSessionExpired()
@@ -207,6 +216,8 @@ class PlaywrightSearchDriver:
         self._active_button = None
         self._active_mode = mode
         self._active_marker = self.page_marker()
+        self._last_diagnostic["page"] = self._page_diagnostic()
+        self._last_diagnostic["stage"] = "form_inspection"
         if not self._active_marker:
             raise SearchNavigationUnexpected()
 
@@ -227,6 +238,12 @@ class PlaywrightSearchDriver:
         expected_suffixes = {
             SIDJILCOM_CONTROL_MAP[item.criterion].name_suffix
             for item in criteria
+        }
+        self._last_diagnostic = {
+            "stage": "form_inspection",
+            "page": self._page_diagnostic(),
+            "forms": [],
+            "button": {"label": "Rechercher", "visible": False, "enabled": False, "associated": False},
         }
         if None in expected_suffixes or not expected_suffixes:
             raise SearchFormUnsafe()
@@ -249,13 +266,38 @@ class PlaywrightSearchDriver:
                         except Exception:
                             continue
                     names = tuple(name for _locator, name in named)
-                    if not all(any(name.casefold().endswith(suffix.casefold()) for name in names) for suffix in expected_suffixes):
-                        continue
+                    form_id = sanitize_metadata_text(form.get_attribute("id") or "", 100)
+                    form_name = sanitize_metadata_text(form.get_attribute("name") or "", 100)
+                    form_class = sanitize_metadata_text(form.get_attribute("class") or "", 180)
+                    form_role = sanitize_metadata_text(form.get_attribute("role") or "", 50)
                     method = (form.get_attribute("method") or "get").strip().casefold()
                     action = (form.get_attribute("action") or self._page.url).strip()
                     target = urljoin(self._page.url, action)
-                    if method != REPORTED_FORM_METHOD.casefold() or not is_portal_host(target, self._portal_url):
-                        raise SearchFormUnsafe()
+                    safe_action = sanitize_diagnostic_url(target, self._portal_url)
+                    parent_portlet = self._parent_portlet(form)
+                    expected_controls: list[dict[str, object]] = []
+                    for item in criteria:
+                        suffix = SIDJILCOM_CONTROL_MAP[item.criterion].name_suffix or ""
+                        for locator, name in named:
+                            if not name.casefold().endswith(suffix.casefold()):
+                                continue
+                            control_info = self._diagnostic_control(locator, name)
+                            control_info["criterion"] = item.criterion
+                            control_info["suffix"] = suffix
+                            expected_controls.append(control_info)
+                    form_diagnostic = {
+                        "id": form_id, "name": form_name, "class": form_class, "role": form_role,
+                        "method": method.upper(), "action": safe_action,
+                        "parent_portlet": parent_portlet.get("id", ""),
+                        "parent_portlet_confirmed": bool(parent_portlet.get("confirmed", False)),
+                        "visible": bool(form.is_visible()),
+                        "fields": expected_controls,
+                    }
+                    observed_forms = self._last_diagnostic.get("forms")
+                    if isinstance(observed_forms, list) and len(observed_forms) < 20:
+                        observed_forms.append(form_diagnostic)
+                    if not all(any(name.casefold().endswith(suffix.casefold()) for name in names) for suffix in expected_suffixes):
+                        continue
                     selected_controls: list[SearchControl] = []
                     for item in criteria:
                         name = resolve_control_name(mode, item.criterion, names)
@@ -285,6 +327,10 @@ class PlaywrightSearchDriver:
                             class_names=classes,
                             aria_autocomplete=aria,
                             option_labels=options,
+                            element_id=locator.get_attribute("id"),
+                            label=self._control_label(locator),
+                            role=locator.get_attribute("role"),
+                            required=(locator.get_attribute("required") is not None or (locator.get_attribute("aria-required") or "").casefold() == "true"),
                             handle=locator,
                         ))
                     all_empty = True
@@ -300,25 +346,83 @@ class PlaywrightSearchDriver:
                         except Exception:
                             all_empty = False
                             break
+                    required_invalid = self._required_invalid_controls(form)
                     buttons = self._find_search_buttons(form)
-                    if len(buttons) != 1:
+                    actionable = [button for button in buttons if button.is_visible() and button.is_enabled()]
+                    button_diag = self._diagnostic_button(buttons[0]) if len(buttons) == 1 else {
+                        "label": "Rechercher", "visible": any(item.is_visible() for item in buttons),
+                        "enabled": any(item.is_enabled() for item in buttons), "associated": bool(buttons),
+                    }
+                    button_diag["candidate_count"] = len(buttons)
+                    form_diagnostic["button"] = button_diag
+                    form_diagnostic["required_invalid_controls"] = list(required_invalid)
+                    self._last_diagnostic["button"] = button_diag
+                    if (
+                        method != REPORTED_FORM_METHOD.casefold()
+                        or not is_portal_host(target, self._portal_url)
+                        or urlsplit(target).path.rstrip("/") != DEFAULT_ENTERPRISE_SEARCH_ROUTE.rstrip("/")
+                        or not parent_portlet.get("confirmed", False)
+                    ):
+                        continue
+                    if len(buttons) != 1 or len(actionable) != 1:
                         matching_forms.append((form, None, tuple(selected_controls), all_empty))
                     else:
-                        matching_forms.append((form, buttons[0], tuple(selected_controls), all_empty))
+                        matching_forms.append((form, actionable[0], tuple(selected_controls), all_empty))
             if len(matching_forms) != 1:
                 raise SearchFormUnsafe()
             form, button, controls, all_empty = matching_forms[0]
             if button is None:
                 raise SearchFormUnsafe()
             self._active_form, self._active_button = form, button
+            method = (form.get_attribute("method") or "get").strip().upper()
+            raw_action = (form.get_attribute("action") or self._page.url).strip()
+            safe_action = sanitize_diagnostic_url(urljoin(self._page.url, raw_action), self._portal_url)
+            parent_portlet = self._parent_portlet(form)
+            button_meta = self._diagnostic_button(button)
+            button_meta["candidate_count"] = len(self._find_search_buttons(form))
+            required_invalid = self._required_invalid_controls(form)
+            self._last_diagnostic.update({
+                "stage": "form_inspection",
+                "form": {
+                    "id": sanitize_metadata_text(form.get_attribute("id") or "", 100),
+                    "name": sanitize_metadata_text(form.get_attribute("name") or "", 100),
+                    "class": sanitize_metadata_text(form.get_attribute("class") or "", 180),
+                    "role": sanitize_metadata_text(form.get_attribute("role") or "", 50),
+                    "method": method,
+                    "action": safe_action,
+                    "parent_portlet": parent_portlet.get("id", ""),
+                    "parent_portlet_confirmed": bool(parent_portlet.get("confirmed", False)),
+                },
+                "fields": [self._diagnostic_control_from_search_control(control) for control in controls],
+                "button": button_meta,
+                "required_invalid_controls": list(required_invalid),
+            })
             return SearchFormSnapshot(
                 mode=mode,
                 page_marker=self._active_marker,
                 controls=controls,
                 all_visible_controls_empty=all_empty,
-                search_button_count=1,
+                search_button_count=len([item for item in self._find_search_buttons(form) if item.is_visible() and item.is_enabled()]),
                 search_button_enabled=button.is_enabled() and button.is_visible(),
                 handle=form,
+                form_id=sanitize_metadata_text(form.get_attribute("id") or "", 100),
+                form_name=sanitize_metadata_text(form.get_attribute("name") or "", 100),
+                form_class=sanitize_metadata_text(form.get_attribute("class") or "", 180),
+                form_role=sanitize_metadata_text(form.get_attribute("role") or "", 50),
+                form_method=method,
+                form_action=safe_action,
+                parent_portlet=str(parent_portlet.get("id", "")),
+                parent_portlet_confirmed=bool(parent_portlet.get("confirmed", False)),
+                button_id=str(button_meta.get("id", "")),
+                button_name=str(button_meta.get("name", "")),
+                button_role=str(button_meta.get("role", "")),
+                button_type=str(button_meta.get("type", "")),
+                button_class=str(button_meta.get("class", "")),
+                required_invalid_controls=required_invalid,
+                blockers=(),
+                page_url=str(self._page_diagnostic().get("url", "")),
+                page_title=str(self._page_diagnostic().get("title", "")),
+                page_section=str(self._page_diagnostic().get("section", "")),
             )
         except SearchExecutionError:
             raise
@@ -542,13 +646,12 @@ class PlaywrightSearchDriver:
 
     @staticmethod
     def _find_search_buttons(form: Any) -> list[Any]:
+        """Retourne uniquement les boutons nommés Rechercher, même désactivés, pour le diagnostic."""
         matches: list[Any] = []
         buttons = form.locator("button, input[type='submit'], input[type='button']")
         for index in range(min(buttons.count(), 50)):
             button = buttons.nth(index)
             try:
-                if not button.is_visible() or not button.is_enabled():
-                    continue
                 if button.evaluate("element => element.tagName.toLowerCase()") == "input":
                     label = button.get_attribute("value") or ""
                 else:
@@ -570,6 +673,149 @@ class PlaywrightSearchDriver:
             raise
         except Exception:
             raise SearchFormUnsafe() from None
+
+    def read_control_value(self, control: SearchControl) -> str:
+        locator = self._require_control(control, control.tag_name, control.input_type)
+        try:
+            return locator.input_value(timeout=1_000)
+        except Exception:
+            raise SearchFormUnsafe("La valeur du contrôle n'a pas pu être vérifiée dans le DOM.", code="dom_value_unreadable") from None
+
+    def failure_diagnostic(self) -> dict[str, object]:
+        return dict(self._last_diagnostic)
+
+    def _page_diagnostic(self) -> dict[str, object]:
+        try:
+            return {
+                "url": sanitize_current_url(self._page.url, self._portal_url),
+                "title": sanitize_metadata_text(self._page.title(), 160),
+                "section": identify_section(self._page.url),
+            }
+        except Exception:
+            return {"url": "", "title": "", "section": "indisponible"}
+
+    @staticmethod
+    def _control_label(locator: Any) -> str:
+        try:
+            label = locator.evaluate("""element => {
+                const labels = Array.from(element.labels || []).map(item => item.innerText || item.textContent || '').join(' ');
+                const wrapping = element.closest('label');
+                return labels || (wrapping ? (wrapping.innerText || wrapping.textContent || '') : '') ||
+                    element.getAttribute('aria-label') || element.getAttribute('title') || '';
+            }""")
+            return sanitize_metadata_text(label, 120)
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _parent_portlet(form: Any) -> dict[str, object]:
+        try:
+            raw = form.evaluate("""(element, marker) => {
+                let current = element.parentElement;
+                while (current) {
+                    if (String(current.id || '').includes(marker)) {
+                        return {id: current.id || '', className: current.className || '', role: current.getAttribute('role') || '', confirmed: true};
+                    }
+                    current = current.parentElement;
+                }
+                return {id: '', className: '', role: '', confirmed: false};
+            }""", SEARCH_MODE_PORTLET_MARKER)
+            return {
+                "id": sanitize_metadata_text(raw.get("id", ""), 140),
+                "class": sanitize_metadata_text(raw.get("className", ""), 180),
+                "role": sanitize_metadata_text(raw.get("role", ""), 50),
+                "confirmed": bool(raw.get("confirmed", False)),
+            }
+        except Exception:
+            return {"id": "", "class": "", "role": "", "confirmed": False}
+
+    @classmethod
+    def _diagnostic_control(cls, locator: Any, name: str) -> dict[str, object]:
+        try:
+            tag = str(locator.evaluate("element => element.tagName.toLowerCase()"))
+            input_type = (locator.get_attribute("type") or ("select-one" if tag == "select" else "text")).casefold()
+            return {
+                "name": cls._safe_dom_name(name),
+                "id": cls._safe_dom_name(locator.get_attribute("id") or ""),
+                "label": cls._control_label(locator),
+                "role": sanitize_metadata_text(locator.get_attribute("role") or "", 50),
+                "tag": tag,
+                "type": input_type,
+                "class": sanitize_metadata_text(locator.get_attribute("class") or "", 180),
+                "visible": bool(locator.is_visible()),
+                "disabled": not bool(locator.is_enabled()) or locator.get_attribute("readonly") is not None,
+                "required": locator.get_attribute("required") is not None or (locator.get_attribute("aria-required") or "").casefold() == "true",
+                "has_value": not cls._is_empty(locator, tag, input_type),
+            }
+        except Exception:
+            return {"name": cls._safe_dom_name(name), "found": False}
+
+    @staticmethod
+    def _safe_dom_name(value: object) -> str:
+        text = sanitize_metadata_text(value, 120)
+        if re.search(r"password|passwd|token|secret|csrf|cookie|session|credential|authorization", text, re.I):
+            return "[identifiant masqué]"
+        return text
+
+    @classmethod
+    def _diagnostic_control_from_search_control(cls, control: SearchControl) -> dict[str, object]:
+        return {
+            "criterion": control.criterion,
+            "name": cls._safe_dom_name(control.name),
+            "id": cls._safe_dom_name(control.element_id or ""),
+            "label": sanitize_metadata_text(control.label, 120),
+            "role": sanitize_metadata_text(control.role or "", 50),
+            "tag": control.tag_name,
+            "type": control.input_type,
+            "class": sanitize_metadata_text(" ".join(control.class_names), 180),
+            "visible": control.visible,
+            "disabled": not control.enabled,
+            "required": control.required,
+            "has_value": not control.empty,
+        }
+
+    @classmethod
+    def _diagnostic_button(cls, button: Any) -> dict[str, object]:
+        try:
+            is_input = button.evaluate("element => element.tagName.toLowerCase() == 'input'")
+            label = (button.get_attribute("value") or "") if is_input else (button.inner_text(timeout=1_000) or "")
+            return {
+                "label": sanitize_metadata_text(label, 80),
+                "id": cls._safe_dom_name(button.get_attribute("id") or ""),
+                "name": cls._safe_dom_name(button.get_attribute("name") or ""),
+                "role": sanitize_metadata_text(button.get_attribute("role") or "", 50),
+                "type": sanitize_metadata_text(button.get_attribute("type") or ("button" if not is_input else ""), 40),
+                "class": sanitize_metadata_text(button.get_attribute("class") or "", 180),
+                "visible": bool(button.is_visible()),
+                "enabled": bool(button.is_enabled()),
+                "associated": True,
+            }
+        except Exception:
+            return {"label": "Rechercher", "visible": False, "enabled": False, "associated": True}
+
+    @staticmethod
+    def _required_invalid_controls(form: Any) -> tuple[str, ...]:
+        try:
+            values = form.evaluate("""form => Array.from(form.elements || []).filter(element => {
+                if (!element || element.disabled) return false;
+                const required = element.required || String(element.getAttribute('aria-required') || '').toLowerCase() === 'true';
+                if (!required) return false;
+                const style = window.getComputedStyle(element);
+                const visible = style.display !== 'none' && style.visibility !== 'hidden' && !!element.getClientRects().length;
+                return visible && !(element.validity ? element.validity.valid : String(element.value || '').trim().length > 0);
+            }).slice(0, 30).map(element => {
+                const name = element.getAttribute('name') || '';
+                const labels = Array.from(element.labels || []).map(label => label.innerText || label.textContent || '').join(' ');
+                return {name, label: labels || element.getAttribute('aria-label') || element.getAttribute('title') || ''};
+            })""")
+            output = []
+            for item in values if isinstance(values, list) else []:
+                label = sanitize_metadata_text(item.get("label", ""), 100)
+                name = PlaywrightSearchDriver._safe_dom_name(item.get("name", ""))
+                output.append(label or name or "champ obligatoire sans libellé")
+            return tuple(output)
+        except Exception:
+            return ("état obligatoire impossible à vérifier",)
 
     def fill_date(self, control: SearchControl, value: str) -> None:
         locator = self._require_control(control, "input", "date")
@@ -619,7 +865,11 @@ class PlaywrightSearchDriver:
         except AutocompleteTestError:
             raise SearchFormUnsafe() from None
 
-    def submit_search(self, form: SearchFormSnapshot) -> None:
+    def submit_search(
+        self, form: SearchFormSnapshot, *, on_attempt: Callable[[], None] | None = None
+    ) -> None:
+        if self._submission_attempted:
+            raise SearchFormUnsafe("Une soumission a déjà été tentée; aucun second clic n'est autorisé.", code="duplicate_submission")
         if self._page is None or self._page.is_closed():
             raise SearchNavigationUnexpected()
         try:
@@ -642,9 +892,89 @@ class PlaywrightSearchDriver:
                 raise SearchSessionExpired()
             if not self._active_button.is_visible() or not self._active_button.is_enabled():
                 raise SearchFormUnsafe()
-            current_buttons = self._find_search_buttons(self._active_form)
-            if len(current_buttons) != 1:
-                raise SearchFormUnsafe()
+            button_candidates = self._find_search_buttons(self._active_form)
+            current_buttons = [button for button in button_candidates if button.is_visible() and button.is_enabled()]
+            if len(button_candidates) != 1 or len(current_buttons) != 1:
+                self._last_diagnostic["button"] = {
+                    "label": "Rechercher", "candidate_count": len(button_candidates),
+                    "visible": any(button.is_visible() for button in button_candidates),
+                    "enabled": any(button.is_enabled() for button in button_candidates),
+                    "associated": bool(button_candidates),
+                }
+                raise SearchFormUnsafe("Le formulaire ne possède plus un bouton Rechercher unique et actif.", code="search_button_changed")
+            current_method = (self._active_form.get_attribute("method") or "GET").strip().upper()
+            current_action = urljoin(self._page.url, self._active_form.get_attribute("action") or self._page.url)
+            current_safe_action = sanitize_diagnostic_url(current_action, self._portal_url)
+            current_parent = self._parent_portlet(self._active_form)
+            previous_form_diagnostic = self._last_diagnostic.get("form", {})
+            form_diagnostic = dict(previous_form_diagnostic) if isinstance(previous_form_diagnostic, dict) else {}
+            form_diagnostic.update({
+                "method": current_method.casefold(), "action": current_safe_action,
+                "parent_portlet": current_parent.get("id", ""),
+                "parent_portlet_confirmed": bool(current_parent.get("confirmed", False)),
+            })
+            self._last_diagnostic["form"] = form_diagnostic
+            if (
+                current_method != "POST"
+                or not is_portal_host(current_action, self._portal_url)
+                or current_safe_action != form.form_action
+            ):
+                raise SearchFormUnsafe("Le formulaire a changé de méthode ou de destination.", code="form_action_changed")
+            if not bool(current_parent.get("confirmed", False)):
+                raise SearchFormUnsafe("Le formulaire n'est plus dans le portlet Recherche Commerçant.", code="form_parent_changed")
+            current_button = self._diagnostic_button(current_buttons[0])
+            current_button["candidate_count"] = len(button_candidates)
+            self._last_diagnostic["button"] = current_button
+            expected_button = {
+                "id": form.button_id, "name": form.button_name, "role": form.button_role,
+                "type": form.button_type, "class": form.button_class,
+            }
+            if str(current_button.get("label", "")).strip().casefold() != "rechercher":
+                raise SearchFormUnsafe("Le bouton de soumission n'est plus exactement Rechercher.", code="search_button_changed")
+            for key in ("id", "name", "role", "type", "class"):
+                previous = str(expected_button.get(key, "") or "")
+                current = str(current_button.get(key, "") or "")
+                if previous and current != previous:
+                    raise SearchFormUnsafe("Le bouton Rechercher a changé depuis sa vérification.", code="search_button_changed")
+            required_invalid = self._required_invalid_controls(self._active_form)
+            self._last_diagnostic["required_invalid_controls"] = list(required_invalid)
+            if required_invalid:
+                raise SearchFormUnsafe("Un champ obligatoire est invalide avant le clic.", code="required_field_invalid")
+            live_fields: list[dict[str, object]] = []
+            for control in form.controls:
+                name_locator = self._active_form.locator("input[name], select[name], textarea[name]")
+                name_matches = [
+                    name_locator.nth(index)
+                    for index in range(min(name_locator.count(), 250))
+                    if name_locator.nth(index).get_attribute("name") == control.name
+                ]
+                if len(name_matches) == 1:
+                    field_info = self._diagnostic_control(name_matches[0], control.name)
+                    field_info["criterion"] = control.criterion
+                    live_fields.append(field_info)
+            if live_fields:
+                self._last_diagnostic["fields"] = live_fields
+            for name, expected in form.verified_values:
+                matching = self._active_form.locator("input[name], select[name], textarea[name]")
+                values = []
+                for index in range(min(matching.count(), 250)):
+                    field = matching.nth(index)
+                    if field.get_attribute("name") == name:
+                        try:
+                            values.append(field.input_value(timeout=1_000))
+                        except Exception:
+                            values.append("")
+                matches = len(values) == 1 and values[0].strip() == expected.strip()
+                for field_info in self._last_diagnostic.get("fields", []):
+                    if isinstance(field_info, dict) and field_info.get("name") == name:
+                        field_info["has_value"] = bool(values and values[0].strip())
+                        field_info["value_matches_criterion"] = matches
+                if not matches:
+                    raise SearchFormUnsafe("Une valeur de critère a changé juste avant le clic.", code="last_moment_value_mismatch")
+            if on_attempt is not None:
+                on_attempt()
+            # Verrou local posé avant l'action : un timeout ambigu ne peut pas déclencher un second clic.
+            self._submission_attempted = True
             # Un clic unique dans l'interface du portail; aucune requête HTTP/API n'est reproduite.
             current_buttons[0].click(timeout=self._timeout_ms)
             try:

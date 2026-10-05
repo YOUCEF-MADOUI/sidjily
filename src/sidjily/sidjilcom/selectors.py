@@ -11,6 +11,7 @@ DEFAULT_ENTERPRISE_SEARCH_ROUTE = "/fr/group/sidjilcom/repertoire-des-commercant
 AMBULANT_SEARCH_ROUTE = "/fr/web/sidjilcom/rechercheambulant"
 ACTIVITY_NOMENCLATURE_ROUTE = "/fr/web/sidjilcom/nomenclature-de-vos-activites"
 DASHBOARD_ROUTE = "/group/sidjilcom/mon-tableau-de-bord"
+SEARCH_MODE_PORTLET_MARKER = "dz_cnrc_sidjilcom_recherchedetaillee_portlet_RechercheDetailleePortlet"
 
 NAVIGATION_LABEL_PATTERNS = {
     "Accueil": re.compile(r"^\s*accueil\s*$", re.IGNORECASE),

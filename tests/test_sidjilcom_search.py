@@ -25,6 +25,7 @@ from sidjily.sidjilcom.search import (
     SearchFormSnapshot,
     SearchObservation,
     SearchSessionExpired,
+    SearchResultsObservationError,
     SearchSuggestionMissing,
     SearchStep,
     validate_first_controlled_search,
@@ -41,18 +42,24 @@ class FakeSearchDriver:
         self.submissions = 0
         self.steps: list[SearchStep] = []
         self.autocomplete_suggestions: tuple[str, ...] | None = None
+        self.autocomplete_suggestions_by_field: dict[str, tuple[str, ...]] = {}
         self.autocomplete_status = AutocompleteTestStatus.SUGGESTIONS
         self.autocomplete_token = "token"
         self.autocomplete_selected: list[int] = []
         self.autocomplete_resets: list[str] = []
         self._last_suggestions: tuple[str, ...] = ()
         self._last_autocomplete_field = ""
+        self.filled_values: dict[str, str] = {}
         self.selection_accepted = True
         self.marker_change_after_fill = False
         self.missing_control: str | None = None
         self.ambiguous_form = False
         self.all_empty = True
+        self.required_invalid_controls: tuple[str, ...] = ()
+        self.parent_portlet_confirmed = True
+        self.form_method = "POST"
         self.button_count = 1
+        self.final_value_overrides: dict[str, str] = {}
         self.button_enabled = True
         self.observation_error = False
         self.result = SearchObservation(
@@ -102,6 +109,15 @@ class FakeSearchDriver:
             all_visible_controls_empty=self.all_empty,
             search_button_count=self.button_count,
             search_button_enabled=self.button_enabled,
+            handle="form",
+            form_id="legal-search",
+            form_class="recherche-commercant",
+            form_role="search",
+            form_method=self.form_method,
+            form_action="https://sidjilcom.cnrc.dz/fr/group/sidjilcom/repertoire-des-commercants",
+            parent_portlet="dz_cnrc_sidjilcom_recherchedetaillee_portlet_RechercheDetailleePortlet",
+            parent_portlet_confirmed=self.parent_portlet_confirmed,
+            required_invalid_controls=self.required_invalid_controls,
         )
 
     @staticmethod
@@ -119,20 +135,33 @@ class FakeSearchDriver:
 
     def fill_text(self, control: SearchControl, value: str) -> None:
         self.fill_calls.append((control.criterion, value))
+        self.filled_values[control.criterion] = value
         if self.marker_change_after_fill:
             self.marker += "/unexpected"
 
+    def read_control_value(self, control: SearchControl) -> str:
+        return self.final_value_overrides.get(
+            control.criterion, self.filled_values.get(control.criterion, "")
+        )
+
+    def failure_diagnostic(self) -> dict[str, object]:
+        return {"page": {"url": self.marker, "section": "Trouver une entreprise", "title": "Recherche Commerçant"}}
+
     def fill_date(self, control: SearchControl, value: str) -> None:
         self.fill_calls.append((control.criterion, value))
+        self.filled_values[control.criterion] = value
 
     def fill_select(self, control: SearchControl, value: str) -> None:
         self.fill_calls.append((control.criterion, value))
+        self.filled_values[control.criterion] = value
 
     def prepare_autocomplete(self, field_id: str, value: str) -> AutocompleteObservation:
         self.fill_calls.append((field_id, value))
-        observed_suggestions = self.autocomplete_suggestions or (value,)
+        observed_suggestions = self.autocomplete_suggestions_by_field.get(
+            field_id, self.autocomplete_suggestions or (value,)
+        )
         self._last_suggestions = observed_suggestions
-        self._last_autocomplete_field = field_id
+        self._last_autocomplete_field = "commune_wilaya" if field_id == "commune_wilaya" else field_id
         suggestions = tuple(self._suggestion(index, text) for index, text in enumerate(observed_suggestions))
         control = AutocompleteControlInfo(
             field_id=field_id,
@@ -180,6 +209,7 @@ class FakeSearchDriver:
     def select_autocomplete(self, token: str, index: int) -> AutocompleteSelectionResult:
         self.autocomplete_selected.append(index)
         value = self._last_suggestions[index]
+        self.filled_values[self._last_autocomplete_field] = value
         return AutocompleteSelectionResult(
             field_id=self._last_autocomplete_field,
             suggestion_text=value,
@@ -193,7 +223,9 @@ class FakeSearchDriver:
     def reset_autocomplete(self, token: str) -> None:
         self.autocomplete_resets.append(token)
 
-    def submit_search(self, form: SearchFormSnapshot) -> None:
+    def submit_search(self, form: SearchFormSnapshot, *, on_attempt=None) -> None:
+        if on_attempt is not None:
+            on_attempt()
         self.submissions += 1
 
     def observe_results(self) -> SearchObservation:
@@ -295,7 +327,10 @@ class SearchExecutorTests(unittest.TestCase):
                     )
                     for control in snapshot.controls
                 )
-                return SearchFormSnapshot(mode, snapshot.page_marker, controls, True, 1, True)
+                return SearchFormSnapshot(
+                    mode, snapshot.page_marker, controls, True, 1, True, handle="form",
+                    form_method="POST", parent_portlet_confirmed=True,
+                )
 
         text_driver = TextDateDriver()
         with self.assertRaises(SearchExecutionError):
@@ -321,14 +356,16 @@ class SearchExecutorTests(unittest.TestCase):
     def test_missing_or_non_exact_autocomplete_suggestion_stops_before_submit(self) -> None:
         criteria = criteria_from_mapping({
             "mode": "PERSONNE_MORALE",
-            "commune_wilaya": "34000 : BORDJ BOU ARRERIDJ",
+            "commune_wilaya": "34000",
         })
         driver = FakeSearchDriver()
-        driver.autocomplete_suggestions = ("34000 : AUTRE WILAYA",)
-        with self.assertRaises(SearchSuggestionMissing):
+        driver.autocomplete_suggestions = ("34001 : AUTRE WILAYA",)
+        with self.assertRaises(SearchSuggestionMissing) as caught:
             SearchExecutor(driver).execute(criteria, confirmed=True)
         self.assertEqual(driver.submissions, 0)
         self.assertEqual(driver.autocomplete_resets, ["token"])
+        self.assertEqual(caught.exception.diagnostic["autocomplete"]["exact_code_match_count"], 0)
+        self.assertEqual(caught.exception.diagnostic["current_field"], "commune_wilaya")
 
     def test_ambiguous_duplicate_exact_autocomplete_suggestions_stop_without_submit(self) -> None:
         criteria = criteria_from_mapping({
@@ -458,6 +495,120 @@ class SearchExecutorTests(unittest.TestCase):
             executor.execute(criteria, confirmed=True)
         self.assertEqual(driver.submissions, 1)
         self.assertEqual(executor.submission_count, 1)
+
+    def test_code_label_suggestions_are_selected_only_when_the_code_token_is_exact(self) -> None:
+        criteria = criteria_from_mapping({
+            "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000",
+        })
+        driver = FakeSearchDriver()
+        driver.autocomplete_suggestions_by_field = {
+            "activite": ("442102 : Libellé officiel de l'activité",),
+            "commune_wilaya": ("34000 : Libellé officiel commune/wilaya",),
+        }
+        result = SearchExecutor(driver).execute(criteria, confirmed=True)
+        self.assertEqual(driver.autocomplete_selected, [0, 0])
+        self.assertEqual(driver.submissions, 1)
+        self.assertEqual(result.result_count, 17)
+
+    def test_post_fill_dom_mismatch_aborts_before_submitting(self) -> None:
+        criteria = criteria_from_mapping({
+            "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000",
+        })
+        driver = FakeSearchDriver()
+        driver.final_value_overrides["activite"] = "442103 : autre activité"
+        with self.assertRaises(SearchExecutionError) as caught:
+            SearchExecutor(driver).execute(criteria, confirmed=True)
+        self.assertEqual(driver.submissions, 0)
+        self.assertEqual(caught.exception.code, "filled_value_mismatch")
+        self.assertEqual(caught.exception.diagnostic["current_field"], "activite")
+        self.assertNotIn("442103", str(caught.exception.diagnostic))
+
+    def test_required_field_missing_or_invalid_stops_before_click(self) -> None:
+        criteria = criteria_from_mapping({
+            "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000",
+        })
+        driver = FakeSearchDriver()
+        driver.required_invalid_controls = ("Forme juridique",)
+        steps: list[SearchStep] = []
+        with self.assertRaises(SearchExecutionError) as caught:
+            SearchExecutor(driver).execute(criteria, confirmed=True, on_step=steps.append)
+        self.assertEqual(driver.submissions, 0)
+        self.assertNotIn(SearchStep.SUBMITTING, steps)
+        self.assertEqual(caught.exception.code, "required_field_invalid")
+
+    def test_absent_search_button_or_wrong_parent_portlet_stops_before_click(self) -> None:
+        criteria = criteria_from_mapping({
+            "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000",
+        })
+        for attribute, value in (("button_count", 0), ("button_count", 2), ("parent_portlet_confirmed", False)):
+            with self.subTest(attribute=attribute):
+                driver = FakeSearchDriver()
+                setattr(driver, attribute, value)
+                steps: list[SearchStep] = []
+                with self.assertRaises(SearchExecutionError):
+                    SearchExecutor(driver).execute(criteria, confirmed=True, on_step=steps.append)
+                self.assertEqual(driver.submissions, 0)
+                self.assertNotIn(SearchStep.SUBMITTING, steps)
+
+    def test_one_executor_cannot_submit_twice_after_double_confirmation(self) -> None:
+        criteria = criteria_from_mapping({
+            "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000",
+        })
+        driver = FakeSearchDriver()
+        executor = SearchExecutor(driver)
+        executor.execute(criteria, confirmed=True)
+        with self.assertRaises(SearchExecutionError) as caught:
+            executor.execute(criteria, confirmed=True)
+        self.assertEqual(caught.exception.code, "duplicate_execution")
+        self.assertEqual(driver.submissions, 1)
+        self.assertEqual(executor.submission_count, 1)
+
+    def test_blank_post_submit_page_is_result_unknown_not_success(self) -> None:
+        criteria = criteria_from_mapping({
+            "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000",
+        })
+        driver = FakeSearchDriver()
+        driver.result = SearchObservation(
+            title="Recherche Commerçant", sanitized_url=driver.marker,
+            result_count=None, table_count=0, row_count=0, columns=(),
+            pagination_visible=False, no_results=False, errors=(), session_expired=False,
+        )
+        steps: list[SearchStep] = []
+        with self.assertRaises(SearchExecutionError) as caught:
+            SearchExecutor(driver).execute(criteria, confirmed=True, on_step=steps.append)
+        self.assertEqual(driver.submissions, 1)
+        self.assertEqual(caught.exception.code, "results_observation_error")
+        self.assertIn(SearchStep.SUBMITTED, steps)
+        self.assertNotIn(SearchStep.RESULTS_DETECTED, steps)
+
+    def test_header_only_table_without_count_or_no_results_is_not_success(self) -> None:
+        criteria = criteria_from_mapping({
+            "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000",
+        })
+        driver = FakeSearchDriver()
+        driver.result = SearchObservation(
+            title="Recherche Commerçant", sanitized_url=driver.marker,
+            result_count=None, table_count=1, row_count=0, columns=("Dénomination", "Wilaya"),
+            pagination_visible=False, no_results=False, errors=(), session_expired=False,
+        )
+        with self.assertRaises(SearchResultsObservationError):
+            SearchExecutor(driver).execute(criteria, confirmed=True)
+        self.assertEqual(driver.submissions, 1)
+
+    def test_result_signals_with_a_portal_error_remain_uncertain(self) -> None:
+        criteria = criteria_from_mapping({
+            "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000",
+        })
+        driver = FakeSearchDriver()
+        driver.result = SearchObservation(
+            title="Recherche Commerçant", sanitized_url=driver.marker,
+            result_count=17, table_count=1, row_count=17, columns=("Dénomination",),
+            pagination_visible=False, no_results=False, errors=("Erreur de chargement",),
+            session_expired=False,
+        )
+        with self.assertRaises(SearchResultsObservationError):
+            SearchExecutor(driver).execute(criteria, confirmed=True)
+        self.assertEqual(driver.submissions, 1)
 
     def test_first_search_policy_accepts_only_exact_personne_morale_pair(self) -> None:
         allowed = criteria_from_mapping({

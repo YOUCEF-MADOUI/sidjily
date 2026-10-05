@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from collections.abc import Iterable
@@ -15,6 +16,167 @@ from sidjily.models import Search, SearchTask, Status
 
 class InvalidTransition(ValueError):
     """Une opération ne correspond pas à l'état courant de la recherche."""
+
+
+def _safe_failure_diagnostic(diagnostic: dict[str, Any]) -> dict[str, Any]:
+    """Whiteliste les seules métadonnées de formulaire utiles; aucune valeur DOM n'est conservée."""
+    def safe_text(value: object, limit: int = 160) -> str:
+        text = " ".join(str(value).split())[:limit]
+        if re.search(r"password|passwd|token|secret|csrf|cookie|session|credential|authorization", text, re.I):
+            return "[identifiant masqué]"
+        return text
+
+    def safe_count(value: object, maximum: int = 100) -> int:
+        if isinstance(value, bool):
+            return 0
+        try:
+            return max(0, min(int(value), maximum))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    def safe_url(value: object) -> str:
+        try:
+            parsed = urlsplit(str(value))
+            host = (parsed.hostname or "").casefold()
+            if parsed.scheme.casefold() != "https" or not (host == "sidjilcom.cnrc.dz" or host.endswith(".sidjilcom.cnrc.dz")):
+                return ""
+            return urlunsplit(("https", host, parsed.path[:500], "", ""))
+        except (TypeError, ValueError):
+            return ""
+
+    allowed_criteria = {"activite", "commune_wilaya"}
+    fields: list[dict[str, Any]] = []
+    candidate_fields = diagnostic.get("fields", diagnostic.get("controls", []))
+    forms = diagnostic.get("forms", [])
+    if (not isinstance(candidate_fields, list) or not candidate_fields) and isinstance(forms, list) and forms:
+        candidate_fields = forms[0].get("fields", []) if isinstance(forms[0], dict) else []
+    for control in candidate_fields[:20] if isinstance(candidate_fields, list) else []:
+        if not isinstance(control, dict):
+            continue
+        criterion = control.get("criterion")
+        if criterion not in allowed_criteria and criterion is not None:
+            continue
+        item: dict[str, Any] = {
+            key: safe_text(control.get(key), 180)
+            for key in ("criterion", "suffix", "name", "id", "label", "role", "tag", "type", "class")
+            if isinstance(control.get(key), str)
+        }
+        for key in ("visible", "enabled", "disabled", "required", "has_value", "empty_before_fill", "value_matches_criterion", "found"):
+            if type(control.get(key)) is bool:
+                item[key] = control[key]
+        fields.append(item)
+
+    form = diagnostic.get("form")
+    if not isinstance(form, dict) and isinstance(forms, list) and forms and isinstance(forms[0], dict):
+        form = forms[0]
+    form_info: dict[str, Any] = {}
+    if isinstance(form, dict):
+        for key in ("id", "name", "class", "role", "method", "parent_portlet"):
+            if isinstance(form.get(key), str):
+                form_info[key] = safe_text(form[key], 180)
+        form_info["action"] = safe_url(form.get("action", ""))
+        for key in ("visible", "parent_portlet_confirmed"):
+            if type(form.get(key)) is bool:
+                form_info[key] = form[key]
+
+    button = diagnostic.get("button")
+    button_info: dict[str, Any] = {}
+    if isinstance(button, dict):
+        for key in ("label", "id", "name", "role", "type", "class"):
+            if isinstance(button.get(key), str):
+                button_info[key] = safe_text(button[key], 180)
+        for key in ("visible", "enabled", "associated"):
+            if type(button.get(key)) is bool:
+                button_info[key] = button[key]
+        count = button.get("candidate_count", button.get("search_button_count"))
+        if type(count) is int:
+            button_info["candidate_count"] = max(0, min(count, 20))
+
+    page = diagnostic.get("page")
+    page_info: dict[str, str] = {}
+    if isinstance(page, dict):
+        page_info = {
+            "url": safe_url(page.get("url", "")),
+            "title": safe_text(page.get("title", ""), 160),
+            "section": safe_text(page.get("section", ""), 80),
+        }
+    expected = [
+        {"criterion": item, "suffix": suffix}
+        for item, suffix in (("activite", "_activi"), ("commune_wilaya", "_wilcom"))
+        if any(
+            isinstance(entry, dict) and entry.get("criterion") == item
+            for entry in diagnostic.get("expected_fields", [])
+        )
+    ]
+    safe_candidate_forms: list[dict[str, Any]] = []
+    if isinstance(forms, list):
+        for candidate in forms[:10]:
+            if not isinstance(candidate, dict):
+                continue
+            candidate_info = {
+                key: safe_text(candidate.get(key), 180)
+                for key in ("id", "name", "class", "role", "method", "parent_portlet")
+                if isinstance(candidate.get(key), str)
+            }
+            candidate_info["action"] = safe_url(candidate.get("action", ""))
+            candidate_info.update({
+                key: candidate[key]
+                for key in ("visible", "parent_portlet_confirmed")
+                if type(candidate.get(key)) is bool
+            })
+            candidate_info["fields"] = _safe_failure_diagnostic({
+                "fields": candidate.get("fields", [])
+            }).get("fields", [])
+            candidate_info["button"] = _safe_failure_diagnostic({
+                "button": candidate.get("button", {})
+            }).get("button", {})
+            required = candidate.get("required_invalid_controls", [])
+            candidate_info["required_invalid_controls"] = [
+                safe_text(item, 120) for item in required[:20]
+            ] if isinstance(required, list) else []
+            safe_candidate_forms.append(candidate_info)
+
+    safe: dict[str, Any] = {
+        "kind": "sidjilcom_controlled_search_failure",
+        "stage": safe_text(diagnostic.get("stage", ""), 80),
+        "mode": "PERSONNE_MORALE" if diagnostic.get("mode") == "PERSONNE_MORALE" else "",
+        "reason_code": safe_text(diagnostic.get("reason_code", "search_stopped"), 80),
+        "current_field": safe_text(diagnostic.get("current_field", ""), 80),
+        "expected_fields": expected,
+        "page": page_info,
+        "form": form_info,
+        "candidate_forms": safe_candidate_forms,
+        "fields": fields,
+        "button": button_info,
+        "required_invalid_controls": [safe_text(item, 120) for item in diagnostic.get("required_invalid_controls", [])[:20]]
+        if isinstance(diagnostic.get("required_invalid_controls", []), list) else [],
+        "sensitive_values_saved": False,
+        "cookies_saved": False,
+        "tokens_saved": False,
+        "session_identifiers_saved": False,
+        "captured_at": utc_now(),
+    }
+    autocomplete = diagnostic.get("autocomplete")
+    if isinstance(autocomplete, dict):
+        safe["autocomplete"] = {
+            "field": safe_text(autocomplete.get("field", ""), 80),
+            "suffix": safe_text(autocomplete.get("suffix", ""), 30),
+            "suggestion_count": safe_count(autocomplete.get("suggestion_count", 0)),
+            "exact_code_match_count": safe_count(autocomplete.get("exact_code_match_count", 0)),
+            "selection_required": bool(autocomplete.get("selection_required", False)),
+            "selected_value_matches": bool(autocomplete.get("selected_value_matches", False)),
+        }
+        control = autocomplete.get("control")
+        if isinstance(control, dict):
+            safe["autocomplete"]["control"] = {
+                key: safe_text(control.get(key, ""), 180)
+                for key in ("tag", "id", "role", "type", "classes")
+                if isinstance(control.get(key, ""), str)
+            } | {
+                key: bool(control.get(key, False))
+                for key in ("visible", "enabled")
+            }
+    return safe
 
 
 def _safe_structural_summary(summary: dict[str, Any]) -> dict[str, Any]:
@@ -457,48 +619,65 @@ class TaskManager:
     def update_controlled_search_pre_submit_diagnostic(
         self, search_id: str, diagnostic: dict[str, Any]
     ) -> None:
-        """Enregistre un contrôle de formulaire dénué de valeurs et secrets, avant le clic."""
+        """Enregistre le précontrôle structuré avant le clic, sans valeur de champ DOM."""
         if diagnostic.get("kind") != "sidjilcom_pre_submit_diagnostic":
             raise ValueError("Diagnostic préalable invalide.")
         if any(diagnostic.get(key) is not False for key in (
             "sensitive_values_saved", "cookies_saved", "tokens_saved", "session_identifiers_saved",
         )):
             raise ValueError("Un diagnostic préalable ne peut pas contenir de secrets.")
-        safe_controls = []
         controls = diagnostic.get("controls", [])
         criteria = diagnostic.get("criteria", [])
+        allowed_criteria = {"activite", "commune_wilaya"}
         if not isinstance(controls, list) or not isinstance(criteria, list):
             raise ValueError("Contrôles du diagnostic préalable invalides.")
-        allowed_criteria = {"activite", "commune_wilaya"}
         if any(not isinstance(item, str) or item not in allowed_criteria for item in criteria):
             raise ValueError("Critères du diagnostic préalable invalides.")
-        allowed_control_keys = {"criterion", "tag", "type", "visible", "enabled", "empty_before_fill"}
+        sanitized = _safe_failure_diagnostic({
+            **diagnostic,
+            "kind": "sidjilcom_controlled_search_failure",
+            "reason_code": "pre_submit_verified",
+            "expected_fields": [{"criterion": item} for item in criteria],
+        })
+        safe_controls = []
         for control in controls:
-            if not isinstance(control, dict) or set(control) - allowed_control_keys:
-                raise ValueError("Le diagnostic préalable contient un champ non autorisé.")
-            if control.get("criterion") not in allowed_criteria:
+            if not isinstance(control, dict) or control.get("criterion") not in allowed_criteria:
                 raise ValueError("Critère de contrôle préalable non autorisé.")
-            if control.get("tag") not in {"input", "select", "textarea"}:
-                raise ValueError("Type de contrôle préalable non autorisé.")
-            if control.get("type") not in {"text", "date", "select-one"}:
-                raise ValueError("Type d'entrée préalable non autorisé.")
-            if any(type(control.get(key)) is not bool for key in ("visible", "enabled", "empty_before_fill")):
-                raise ValueError("État de contrôle préalable invalide.")
-            safe_controls.append({key: control.get(key) for key in allowed_control_keys if key in control})
-        safe_diagnostic = {
-            "kind": "sidjilcom_pre_submit_diagnostic",
-            "mode": "PERSONNE_MORALE" if diagnostic.get("mode") == "PERSONNE_MORALE" else "",
-            "criteria": list(criteria[:20]),
-            "controls": safe_controls,
-            "all_visible_controls_empty_before_fill": bool(diagnostic.get("all_visible_controls_empty_before_fill", False)),
-            "search_button_count": max(0, min(int(diagnostic.get("search_button_count", 0)), 20)),
-            "search_button_enabled": bool(diagnostic.get("search_button_enabled", False)),
-            "sensitive_values_saved": False,
-            "cookies_saved": False,
-            "tokens_saved": False,
-            "session_identifiers_saved": False,
-            "captured_at": utc_now(),
-        }
+            safe_control = dict(control)
+            if isinstance(control.get("classes"), list):
+                safe_control["class"] = " ".join(
+                    value for value in control["classes"][:12] if isinstance(value, str)
+                )
+            safe_item = _safe_failure_diagnostic({"fields": [safe_control]})["fields"]
+            if safe_item:
+                item = safe_item[0]
+                if isinstance(item.get("class"), str):
+                    item["classes"] = item["class"].split()[:12]
+                for key in ("enabled", "empty_before_fill"):
+                    if type(control.get(key)) is bool:
+                        item[key] = control[key]
+                safe_controls.append(item)
+        sanitized["kind"] = "sidjilcom_pre_submit_diagnostic"
+        sanitized["criteria"] = list(criteria[:20])
+        sanitized["controls"] = safe_controls
+        sanitized["all_visible_controls_empty_before_fill"] = bool(
+            diagnostic.get("all_visible_controls_empty_before_fill", False)
+        )
+        try:
+            raw_button_count = int(diagnostic.get("search_button_count", 0))
+        except (TypeError, ValueError, OverflowError):
+            raw_button_count = 0
+        sanitized["search_button_count"] = max(0, min(raw_button_count, 20))
+        sanitized["search_button_enabled"] = bool(diagnostic.get("search_button_enabled", False))
+        sanitized["page"] = sanitized.get("page", {"url": "", "title": "", "section": ""})
+        sanitized["sensitive_values_saved"] = False
+        sanitized["cookies_saved"] = False
+        sanitized["tokens_saved"] = False
+        sanitized["session_identifiers_saved"] = False
+        if isinstance(diagnostic.get("form"), dict):
+            sanitized["form"] = sanitized.get("form", {})
+        if isinstance(diagnostic.get("button"), dict):
+            sanitized["button"] = sanitized.get("button", {})
         now = utc_now()
         with self.database.connection(immediate=True) as connection:
             task = connection.execute(
@@ -511,13 +690,44 @@ class TaskManager:
                 raise InvalidTransition("Le diagnostic préalable exige une recherche contrôlée en cours.")
             connection.execute(
                 "UPDATE searches SET result_summary_json = ?, updated_at = ? WHERE id = ?",
-                (self.database.encode_json({"pre_submit_diagnostic": safe_diagnostic}), now, search_id),
+                (self.database.encode_json({"pre_submit_diagnostic": sanitized}), now, search_id),
             )
             connection.execute("UPDATE tasks SET updated_at = ? WHERE id = ?", (now, task["id"]))
             self.database.add_event(
                 connection,
-                "Diagnostic structurel préalable enregistré sans valeurs, cookies, tokens ni identifiants.",
+                "Précontrôle du formulaire Commerçant réussi; les deux valeurs DOM correspondent et aucun secret n'est enregistré.",
                 search_id=search_id, task_id=task["id"],
+            )
+
+    def store_controlled_search_failure_diagnostic(
+        self, search_id: str, diagnostic: dict[str, Any]
+    ) -> None:
+        """Conserve une empreinte structurelle sûre d'un blocage avant ou après le clic."""
+        if not isinstance(diagnostic, dict):
+            return
+        safe = _safe_failure_diagnostic(diagnostic)
+        now = utc_now()
+        with self.database.connection(immediate=True) as connection:
+            task = connection.execute(
+                "SELECT t.id, t.status, s.result_summary_json FROM tasks AS t "
+                "JOIN searches AS s ON s.id = t.search_id "
+                "WHERE s.id = ? AND t.task_type = 'sidjilcom_controlled_search'",
+                (search_id,),
+            ).fetchone()
+            if task is None:
+                raise KeyError(f"Recherche Sidjilcom introuvable : {search_id}")
+            if task["status"] != Status.RUNNING:
+                return
+            summary = json.loads(task["result_summary_json"]) if task["result_summary_json"] else {}
+            summary["controlled_search_failure_diagnostic"] = safe
+            connection.execute(
+                "UPDATE searches SET result_summary_json = ?, updated_at = ? WHERE id = ?",
+                (self.database.encode_json(summary), now, search_id),
+            )
+            self.database.add_event(
+                connection,
+                f"Diagnostic structurel enregistré; raison={safe['reason_code']}, étape={safe['stage']}; aucune valeur DOM, cookie ou jeton conservé.",
+                level="WARNING", search_id=search_id, task_id=task["id"],
             )
 
     def complete_controlled_search(self, search_id: str, summary: dict[str, Any]) -> None:
