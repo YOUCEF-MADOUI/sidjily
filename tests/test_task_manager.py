@@ -146,6 +146,8 @@ class TaskManagerTests(unittest.TestCase):
         self.assertIsNone(self.manager.start_next_task(search.id))
         task = self.manager.start_controlled_search(search.id)
         self.assertEqual(task.attempts, 1)
+        with self.assertRaises(InvalidTransition):
+            self.manager.start_controlled_search(search.id)
         self.manager.update_controlled_search_step(search.id, "filling_criteria")
         self.assertEqual(self.manager.get_search(search.id).step, "filling_criteria")
         self.manager.update_controlled_search_pre_submit_diagnostic(search.id, {
@@ -185,8 +187,10 @@ class TaskManagerTests(unittest.TestCase):
         self.assertEqual(restored.result_summary["row_count"], 4)
         self.assertIn("pre_submit_diagnostic", restored.result_summary)
         self.assertEqual(self.manager.list_tasks(search.id)[0].result_count, 4)
+        historical = self.manager.create_controlled_search("Historique après soumission", search.criteria)
+        self.assertEqual(historical.status, Status.PENDING)
         with self.assertRaises(InvalidTransition):
-            self.manager.create_controlled_search("Double soumission", search.criteria)
+            self.manager.start_controlled_search(historical.id)
         with self.assertRaises(InvalidTransition):
             self.manager.start_controlled_search(search.id)
 
@@ -198,14 +202,21 @@ class TaskManagerTests(unittest.TestCase):
         restored = self.manager.get_search(search.id)
         task = self.manager.list_tasks(search.id)[0]
         self.assertEqual(restored.status, Status.FAILED)
-        self.assertEqual(restored.step, "failed")
+        self.assertEqual(restored.step, "failed_before_submission")
         self.assertEqual(restored.last_error, "Suggestion exacte absente.")
         self.assertEqual(task.error, "Suggestion exacte absente.")
         with self.assertRaises(InvalidTransition):
             self.manager.resume_search(search.id)
         with self.assertRaises(InvalidTransition):
             self.manager.start_controlled_search(search.id)
-        self.manager.create_controlled_search("Nouvel essai manuel après échec pré-soumission", {"mode": "PERSONNE_MORALE"})
+        next_search = self.manager.create_controlled_search(
+            "Nouvel essai manuel après échec pré-soumission", {"mode": "PERSONNE_MORALE"}
+        )
+        self.assertEqual(self.manager.controlled_submission_state(), "available")
+        self.manager.start_controlled_search(next_search.id)
+        self.assertEqual(self.manager.controlled_submission_state(), "reserved")
+        # Les deux tentatives restent visibles dans l'historique.
+        self.assertEqual(len(self.manager.list_searches()), 2)
 
     def test_controlled_submission_failure_is_result_unknown_and_follow_up_is_read_only(self) -> None:
         search = self.manager.create_controlled_search(
@@ -223,8 +234,10 @@ class TaskManagerTests(unittest.TestCase):
             self.manager.resume_search(search.id)
         with self.assertRaises(InvalidTransition):
             self.manager.start_controlled_search(search.id)
+        another = self.manager.create_controlled_search("Historique bloqué", search.criteria)
         with self.assertRaises(InvalidTransition):
-            self.manager.create_controlled_search("Double soumission", search.criteria)
+            self.manager.start_controlled_search(another.id)
+        self.assertEqual(self.manager.controlled_submission_state(), "submitted")
 
         diagnostic = {
             "title": "Résultats",
@@ -257,8 +270,10 @@ class TaskManagerTests(unittest.TestCase):
             restarted.resume_search(search.id)
         with self.assertRaises(InvalidTransition):
             restarted.start_controlled_search(search.id)
+        blocked = restarted.create_controlled_search("Ne pas relancer", search.criteria)
         with self.assertRaises(InvalidTransition):
-            restarted.create_controlled_search("Ne pas relancer", search.criteria)
+            restarted.start_controlled_search(blocked.id)
+        self.assertEqual(restarted.controlled_submission_state(), "submitted")
 
     def test_zero_result_observation_persists_no_results_terminal_step(self) -> None:
         search = self.manager.create_controlled_search("Aucun résultat", {"mode": "PERSONNE_MORALE"})
@@ -270,8 +285,9 @@ class TaskManagerTests(unittest.TestCase):
             "pagination_visible": False, "no_results": True, "errors": [], "session_expired": False,
         })
         self.assertEqual(self.manager.get_search(search.id).step, "no_results")
+        blocked = self.manager.create_controlled_search("Historique protégé", {"mode": "PERSONNE_MORALE"})
         with self.assertRaises(InvalidTransition):
-            self.manager.create_controlled_search("Pas de doublon", {"mode": "PERSONNE_MORALE"})
+            self.manager.start_controlled_search(blocked.id)
 
     def test_confirmed_draft_is_promoted_atomically_into_single_attempt(self) -> None:
         criteria = {"mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000"}
@@ -285,8 +301,109 @@ class TaskManagerTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             self.manager.promote_draft_to_controlled_search(draft.id, "Encore", criteria)
         another = self.manager.create_draft("Deuxième brouillon", criteria, {"submitted": False})
+        prepared = self.manager.promote_draft_to_controlled_search(another.id, "Tentative en trop", criteria)
+        self.assertTrue(self.manager.is_prepared_controlled_search(prepared.id))
         with self.assertRaises(InvalidTransition):
-            self.manager.promote_draft_to_controlled_search(another.id, "Tentative en trop", criteria)
+            self.manager.start_controlled_search(prepared.id)
+
+    def test_abandoned_pre_submit_reservation_is_released_on_recovery_and_history_is_kept(self) -> None:
+        abandoned = self.manager.create_controlled_search("Abandonnée avant soumission", {"mode": "PERSONNE_MORALE"})
+        self.manager.start_controlled_search(abandoned.id)
+
+        restarted = TaskManager(Database(self.database_path))
+        self.assertEqual(restarted.recover_interrupted(), 1)
+        restored = restarted.get_search(abandoned.id)
+        self.assertEqual(restored.step, "failed_before_submission")
+        self.assertEqual(restarted.controlled_submission_state(), "available")
+
+        fresh = restarted.create_controlled_search("Premier vrai test", {
+            "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000",
+        })
+        restarted.start_controlled_search(fresh.id)
+        self.assertEqual(restarted.controlled_submission_state(), "reserved")
+        searches = {search.id for search in restarted.list_searches()}
+        self.assertEqual(searches, {abandoned.id, fresh.id})
+
+    def test_submission_event_keeps_lock_even_if_current_state_was_overwritten(self) -> None:
+        search = self.manager.create_controlled_search("Trace historique", {"mode": "PERSONNE_MORALE"})
+        task = self.manager.start_controlled_search(search.id)
+        self.manager.update_controlled_search_step(search.id, "submitting")
+        with self.manager.database.connection(immediate=True) as connection:
+            connection.execute(
+                "UPDATE searches SET status = ?, step = 'failed_before_submission' WHERE id = ?",
+                (Status.FAILED, search.id),
+            )
+            connection.execute(
+                "UPDATE tasks SET status = ? WHERE id = ?", (Status.FAILED, task.id)
+            )
+        self.assertEqual(self.manager.controlled_submission_state(), "submitted")
+        stale = self.manager.create_controlled_search("À ne pas soumettre", {"mode": "PERSONNE_MORALE"})
+        with self.assertRaises(InvalidTransition):
+            self.manager.start_controlled_search(stale.id)
+
+    def test_submission_event_marks_failure_unknown_even_if_step_was_rewound(self) -> None:
+        search = self.manager.create_controlled_search("Étape réécrite", {"mode": "PERSONNE_MORALE"})
+        self.manager.start_controlled_search(search.id)
+        self.manager.update_controlled_search_step(search.id, "submitting")
+        with self.manager.database.connection(immediate=True) as connection:
+            connection.execute(
+                "UPDATE searches SET step = 'form_validation' WHERE id = ?", (search.id,)
+            )
+        self.manager.fail_controlled_search(search.id, "Interruption après tentative de soumission.")
+        failed = self.manager.get_search(search.id)
+        self.assertEqual(failed.step, "result_unknown")
+        self.assertEqual(self.manager.controlled_submission_state(), "submitted")
+
+    def test_prepared_controlled_search_can_be_restored_and_updated_without_reservation(self) -> None:
+        criteria = {"mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000"}
+        prepared = self.manager.create_controlled_search("Préparée", criteria)
+        self.assertEqual(self.manager.controlled_submission_state(), "available")
+        self.assertTrue(self.manager.is_prepared_controlled_search(prepared.id))
+        self.assertEqual(self.manager.list_prepared_controlled_searches()[0].id, prepared.id)
+        updated = self.manager.update_prepared_controlled_search(
+            prepared.id, "Préparée restaurée", criteria, {"submitted": False}
+        )
+        self.assertEqual(updated.name, "Préparée restaurée")
+        self.assertEqual(updated.result_summary, {"submitted": False})
+        self.assertEqual(self.manager.controlled_submission_state(), "available")
+        started = self.manager.start_controlled_search(prepared.id)
+        self.assertEqual(started.attempts, 1)
+
+    def test_v2_migration_only_seeds_claim_from_possible_submission_evidence(self) -> None:
+        failed = self.manager.create_controlled_search("Ancien échec", {"mode": "PERSONNE_MORALE"})
+        submitted = self.manager.create_controlled_search("Soumission possible", {"mode": "PERSONNE_MORALE"})
+        with self.manager.database.connection(immediate=True) as connection:
+            failed_task = connection.execute("SELECT id FROM tasks WHERE search_id = ?", (failed.id,)).fetchone()["id"]
+            submitted_task = connection.execute("SELECT id FROM tasks WHERE search_id = ?", (submitted.id,)).fetchone()["id"]
+            connection.execute(
+                "UPDATE searches SET status = ?, step = 'failed' WHERE id = ?", (Status.FAILED, failed.id)
+            )
+            connection.execute(
+                "UPDATE tasks SET status = ?, attempts = 1 WHERE id = ?", (Status.FAILED, failed_task)
+            )
+            connection.execute(
+                "UPDATE searches SET status = ?, step = 'failed' WHERE id = ?", (Status.FAILED, submitted.id)
+            )
+            connection.execute(
+                "UPDATE tasks SET status = ?, attempts = 1 WHERE id = ?", (Status.FAILED, submitted_task)
+            )
+            self.manager.database.add_event(
+                connection, "Étape de recherche contrôlée : submitting.", search_id=submitted.id, task_id=submitted_task
+            )
+            connection.execute("DROP TABLE controlled_search_claim")
+            connection.execute("PRAGMA user_version = 2")
+
+        migrated = Database(self.database_path)
+        migrated.initialize()
+        with migrated.connection() as connection:
+            claim = connection.execute("SELECT search_id FROM controlled_search_claim WHERE claim_id = 1").fetchone()
+            history_count = connection.execute("SELECT COUNT(*) FROM searches").fetchone()[0]
+        self.assertEqual(claim["search_id"], submitted.id)
+        self.assertEqual(history_count, 2)
+        manager = TaskManager(migrated)
+        fresh = manager.create_controlled_search("Bloquée après migration", {"mode": "PERSONNE_MORALE"})
+        with self.assertRaises(InvalidTransition):
+            manager.start_controlled_search(fresh.id)
 
     def test_schema_v1_migration_adds_controlled_search_metadata_without_dropping_rows(self) -> None:
         legacy_path = Path(self.temp_dir.name) / "legacy.sqlite3"

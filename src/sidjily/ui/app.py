@@ -364,9 +364,14 @@ class SidjilyApp:
                 return
             criteria_mapping = criteria_to_mapping(criteria)
             summary = draft_summary_record(criteria)
-            if dialog.draft_id:
+            if dialog.draft_id and self.manager.is_draft(dialog.draft_id):
                 saved_search = self.manager.update_draft(dialog.draft_id, name, criteria_mapping, summary)
                 saved_message = "Brouillon mis à jour localement. Aucun envoi à Sidjilcom n'a été effectué."
+            elif dialog.draft_id and self.manager.is_prepared_controlled_search(dialog.draft_id):
+                saved_search = self.manager.update_prepared_controlled_search(
+                    dialog.draft_id, name, criteria_mapping, summary
+                )
+                saved_message = "Recherche préparée mise à jour localement. Aucune soumission n'a été effectuée."
             else:
                 saved_search = self.manager.create_draft(name, criteria_mapping, summary)
                 saved_message = "Brouillon enregistré localement. Aucune recherche n'a été envoyée à Sidjilcom."
@@ -411,13 +416,22 @@ class SidjilyApp:
             messagebox.showinfo("Recherche en cours", "Une recherche contrôlée est déjà en cours.", parent=self.root)
             return
         try:
+            state = self.manager.controlled_submission_state()
+            if state == "submitted":
+                raise InvalidTransition(
+                    "Une soumission réelle ou potentielle est déjà enregistrée; SIDJILY bloque toute nouvelle soumission."
+                )
+            if state == "reserved":
+                raise InvalidTransition("Une recherche contrôlée est déjà réservée et en cours.")
             validate_first_controlled_search(criteria)
             mapping = criteria_to_mapping(criteria)
-            search = (
-                self.manager.promote_draft_to_controlled_search(draft_id, name, mapping)
-                if draft_id else self.manager.create_controlled_search(name, mapping)
-            )
-            self.manager.start_controlled_search(search.id, step="mode_selection")
+            if draft_id and self.manager.is_draft(draft_id):
+                search = self.manager.promote_draft_to_controlled_search(draft_id, name, mapping)
+            elif draft_id and self.manager.is_prepared_controlled_search(draft_id):
+                search = self.manager.update_prepared_controlled_search(draft_id, name, mapping)
+            else:
+                search = self.manager.create_controlled_search(name, mapping)
+            self.manager.start_controlled_search(search.id)
             future = self.session_manager.execute_search(
                 criteria,
                 confirmed=True,
@@ -441,15 +455,21 @@ class SidjilyApp:
     def resume_selected(self) -> None:
         selected = self._selected_search(required=False)
         draft = None
-        if selected is not None and self.manager.is_draft(selected.id):
+        if selected is not None and (
+            self.manager.is_draft(selected.id)
+            or self.manager.is_prepared_controlled_search(selected.id)
+        ):
             draft = selected
         else:
-            drafts = self.manager.list_drafts(limit=1)
-            draft = drafts[0] if drafts else None
+            candidates = [
+                *self.manager.list_drafts(limit=1),
+                *self.manager.list_prepared_controlled_searches(limit=1),
+            ]
+            draft = max(candidates, key=lambda item: item.updated_at) if candidates else None
         if draft is None:
             messagebox.showinfo(
-                "Aucun brouillon à continuer",
-                "Sélectionnez un brouillon ou créez une nouvelle recherche préparatoire.",
+                "Aucune recherche préparée à continuer",
+                "Sélectionnez un brouillon ou une recherche préparée, ou créez une nouvelle recherche préparatoire.",
                 parent=self.root,
             )
             return
@@ -1073,8 +1093,8 @@ class _NewSearchDialog:
             self._prepare_preview(show_errors=False)
             self.status.configure(
                 text=(
-                    f"Brouillon restauré — créé le {initial_search.created_at} · "
-                    f"état : {initial_search.status.value}. Modifiez les critères puis enregistrez."
+                    f"Préparation restaurée — créée le {initial_search.created_at} · "
+                    f"état : {initial_search.status.value}. Modifiez les critères puis enregistrez ou confirmez explicitement le lancement."
                 )
             )
 

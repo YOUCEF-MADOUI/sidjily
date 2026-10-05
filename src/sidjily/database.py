@@ -141,8 +141,21 @@ class Database:
                 if has_tasks:
                     connection.execute(
                         "INSERT OR IGNORE INTO controlled_search_claim(claim_id, search_id, claimed_at) "
-                        "SELECT 1, search_id, created_at FROM tasks "
-                        "WHERE task_type = 'sidjilcom_controlled_search' ORDER BY created_at LIMIT 1"
+                        "SELECT 1, s.id, s.created_at FROM searches AS s "
+                        "JOIN tasks AS t ON t.search_id = s.id "
+                        "WHERE t.task_type = 'sidjilcom_controlled_search' AND ("
+                        "s.status = 'completed' OR t.status = 'completed' OR s.step IN "
+                        "('submitting', 'submitted', 'observing_results', 'results_detected', 'no_results', "
+                        "'result_unknown', 'succeeded', 'completed') OR EXISTS ("
+                        "SELECT 1 FROM events AS e WHERE e.search_id = s.id AND e.task_id = t.id "
+                        "AND e.message IN ("
+                        "'Étape de recherche contrôlée : submitting.', "
+                        "'Étape de recherche contrôlée : submitted.', "
+                        "'Étape de recherche contrôlée : observing_results.', "
+                        "'Étape de recherche contrôlée : results_detected.', "
+                        "'Étape de recherche contrôlée : no_results.', "
+                        "'Étape de recherche contrôlée : completed.'" "))) "
+                        "ORDER BY s.created_at, s.id LIMIT 1"
                     )
                 connection.execute("PRAGMA user_version = 3")
 
