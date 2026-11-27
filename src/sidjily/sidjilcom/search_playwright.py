@@ -1317,7 +1317,17 @@ class PlaywrightSearchDriver:
             # Verrou local posé avant l'action : un timeout ambigu ne peut pas déclencher un second clic.
             self._submission_attempted = True
             # Un clic unique dans l'interface du portail; aucune requête HTTP/API n'est reproduite.
-            current_buttons[0].click(timeout=self._timeout_ms)
+            # On écoute seulement la réponse du portail à ce clic (POST sur la route de recherche).
+            clicked = False
+            response_seen = False
+            try:
+                with self._page.expect_response(self._is_search_response, timeout=self._results_timeout_ms):
+                    current_buttons[0].click(timeout=self._timeout_ms)
+                    clicked = True
+                response_seen = True
+            except Exception:
+                if not clicked:
+                    raise
             try:
                 self._page.wait_for_load_state("domcontentloaded", timeout=5_000)
             except Exception:
@@ -1327,29 +1337,61 @@ class PlaywrightSearchDriver:
             raise
         except Exception:
             raise SearchFormUnsafe() from None
-        self.wait_for_results()
+        self.wait_for_results(response_seen=response_seen)
 
-    def _results_settled(self) -> bool:
+    def _is_search_response(self, response: Any) -> bool:
+        try:
+            return (
+                response.request.method.upper() == "POST"
+                and is_portal_host(response.url, self._portal_url)
+                and urlsplit(response.url).path.rstrip("/") == DEFAULT_ENTERPRISE_SEARCH_ROUTE.rstrip("/")
+            )
+        except Exception:
+            return False
+
+    def _results_state(self) -> str:
+        """« final » (tableau, refus > 300, session expirée), « message » (erreur / aucun résultat) ou « »."""
         raw = self._page.evaluate(_RESULTS_DOM_SCRIPT)
         if not isinstance(raw, dict):
-            return False
-        return bool(
-            raw.get("tooLarge") or raw.get("noResults") or raw.get("sessionExpired") or raw.get("errors")
-            or (int(raw.get("tableCount", 0) or 0) > 0 and int(raw.get("rowCount", 0) or 0) > 0)
-        )
+            return ""
+        if raw.get("tooLarge") or raw.get("sessionExpired") or (
+            int(raw.get("tableCount", 0) or 0) > 0 and int(raw.get("rowCount", 0) or 0) > 0
+        ):
+            return "final"
+        if raw.get("noResults") or raw.get("errors"):
+            return "message"
+        return ""
 
-    def wait_for_results(self) -> None:
-        """Attend (lecture seule) que la réponse AJAX affiche un tableau, un message ou une erreur."""
+    def _results_settled(self) -> bool:
+        return self._results_state() != ""
+
+    # Un message seul (« il n'y a pas de résultat… », erreur) ne conclut que s'il reste affiché ce délai
+    # après la réponse du portail : le tableau peut être inséré juste après la réponse AJAX.
+    MESSAGE_STABLE_MS = 3_000
+
+    def wait_for_results(self, *, response_seen: bool = True) -> None:
+        """Attend (lecture seule) que la réponse affiche un tableau, un refus, ou un message stable."""
         if self._page is None:
             return
         waited = 0
+        message_since: int | None = None
+        stable_ms = self.MESSAGE_STABLE_MS if response_seen else self.MESSAGE_STABLE_MS * 3
         while waited < self._results_timeout_ms:
             try:
-                if self._page.is_closed() or self._results_settled():
+                if self._page.is_closed():
                     return
+                state = self._results_state()
+                if state == "final":
+                    return
+                if state == "message":
+                    message_since = waited if message_since is None else message_since
+                    if waited - message_since >= stable_ms:
+                        return
+                else:
+                    message_since = None
             except Exception:
                 # Page en cours de remplacement : on réessaie au tour suivant.
-                pass
+                message_since = None
             self._page.wait_for_timeout(1_000)
             waited += 1_000
 

@@ -73,7 +73,7 @@ class PortalState:
     detail_style: str = "action"
     session_expired: bool = False
     autocomplete_init_delay_ms: int = 0
-    # Portail réel : la réponse à « Rechercher » arrive en AJAX après 10 à 20 s.
+    # Portail réel : la réponse à « Rechercher » arrive en AJAX après 10 à 45 s.
     results_delay_ms: int = 0
     # Portail réel : au-delà de 300 lignes, refus « Résultat de la Recherche Trop Grand ».
     max_results: int = 300
@@ -219,6 +219,21 @@ INTRO_ALERT = (
 )
 
 
+def _ajax_submit_js(state: PortalState) -> str:
+    """Comme le portail réel : « Rechercher » envoie un POST en AJAX puis remplace la page."""
+    if not state.results_delay_ms:
+        return ""
+    return f"""
+document.querySelectorAll('form[method=post]').forEach(form => form.addEventListener('submit', event => {{
+  event.preventDefault();
+  const body = new URLSearchParams(new FormData(form));
+  setTimeout(() => fetch(form.action, {{method: 'POST', body}}).then(r => r.text()).then(html => {{
+    document.open(); document.write(html); document.close();
+  }}), {state.results_delay_ms});
+}}));
+"""
+
+
 def search_page(state: PortalState, mode: str | None, results_html: str = "") -> str:
     # Portail réel : les cartes de mode ne s'affichent que tant qu'aucun formulaire n'est choisi.
     links = "" if mode else (
@@ -229,7 +244,7 @@ def search_page(state: PortalState, mode: str | None, results_html: str = "") ->
     body = (f'<section id="p_p_id{NS}" class="portlet-boundary portlet-boundary{NS}">'
             f'<h2 class="portlet-title">Recherche Commerçant</h2>{INTRO_ALERT}{links}{form}{results_html}</section>'
             f'<script>{_AUTOCOMPLETE_JS.replace("AUTOCOMPLETE_INIT_DELAY_MS", str(state.autocomplete_init_delay_ms))}'
-            f'{_DETAIL_ACTION_JS}</script>')
+            f'{_DETAIL_ACTION_JS}{_ajax_submit_js(state)}</script>')
     return _page("Recherche Commerçant - Sidjilcom", body)
 
 
@@ -254,7 +269,10 @@ def results_html(state: PortalState, page: int) -> str:
         return ('<div class="alert alert-danger" role="alert"><strong>Erreur:</strong>'
                 'Résultat de la Recherche Trop Grand ! Veuillez Affiner Votre Recherche</div>')
     if not hits:
-        return '<div class="alert alert-info">Aucun résultat trouvé.</div>'
+        return ('<div class="alert alert-dismissible alert-danger" role="alert">Fin <strong>Erreur:</strong>'
+                "il n'y a pas de résultat pour les critères sélectionnés.</div>"
+                '<div class="alert alert-danger fade alert-dismissible show" role="alert"><strong>Erreur:</strong>'
+                "Votre requête n'a pas abouti.</div>")
     pages = (len(hits) + PAGE_SIZE - 1) // PAGE_SIZE
     page = max(1, min(page, pages))
     rows = []
@@ -362,13 +380,7 @@ class MockPortal:
             form = {key: values[-1] for key, values in parse_qs(request.post_data or "", keep_blank_values=True).items()}
             state.last_criteria = form
             state.submissions.append(form)
-            results = results_html(state, 1)
-            if state.results_delay_ms:
-                # Réponse AJAX lente du portail réel : les résultats n'apparaissent qu'après un délai.
-                results = (f'<div id="ajax-results" style="display:none">{results}</div>'
-                           f'<script>setTimeout(() => {{ document.getElementById("ajax-results")'
-                           f'.style.display = "block"; }}, {state.results_delay_ms});</script>')
-            body = search_page(state, form.get(f"{NS}mode", "morale"), results)
+            body = search_page(state, form.get(f"{NS}mode", "morale"), results_html(state, 1))
         elif path == DEFAULT_ENTERPRISE_SEARCH_ROUTE:
             mode = query.get(f"{NS}mode")
             if f"{NS}cur" in query:

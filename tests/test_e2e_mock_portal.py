@@ -115,6 +115,17 @@ class MockPortalEndToEndTests(unittest.TestCase):
         self.assertEqual(observation.result_count, 23)
         self.assertEqual(len(observation.rows), 10)
 
+    def test_ajax_no_result_message_is_recognised_after_the_portal_response(self) -> None:
+        # Portail réel : personne physique + activité d'importation → « Fin Erreur:il n'y a pas de
+        # résultat pour les critères sélectionnés. » et « Erreur:Votre requête n'a pas abouti. ».
+        self.portal.state.results_delay_ms = 3_000
+        try:
+            observation = self.search({"mode": "PERSONNE_MORALE", "raison_sociale": "introuvable"})
+        finally:
+            self.portal.state.results_delay_ms = 0
+        self.assertTrue(observation.no_results)
+        self.assertEqual(observation.rows, ())
+
     def test_more_than_300_results_is_reported_as_portal_refusal(self) -> None:
         submissions = len(self.portal.state.submissions)
         self.portal.state.max_results = 5
