@@ -222,6 +222,8 @@ class SearchDriver(Protocol):
 
     def reset_autocomplete(self, token: str) -> None: ...
 
+    def release_autocomplete(self, token: str) -> None: ...
+
     def submit_search(
         self, form: SearchFormSnapshot, *, on_attempt: Callable[[], None] | None = None
     ) -> None: ...
@@ -397,7 +399,15 @@ class SearchExecutor:
                         f"Le champ {item.label} est absent, ambigu, prérempli ou désactivé; aucun clic effectué.",
                         diagnostic=self._failure_diagnostic(criteria, SearchFormUnsafe()),
                     )
-                self._validate_control_type(mapping.component_type, mapping, control, item.value)
+                try:
+                    self._validate_control_type(mapping.component_type, mapping, control, item.value)
+                except SearchCriteriaNotSupported:
+                    raise SearchExecutionError(
+                        f"Le champ « {item.label} » du portail n'a pas la forme attendue "
+                        f"({control.tag_name}/{control.input_type}); retirez ce critère ou recapturez les listes.",
+                        code="control_type_mismatch",
+                        diagnostic=self._failure_diagnostic(criteria, SearchFormUnsafe()),
+                    ) from None
         except SearchExecutionError:
             raise
         except Exception:
@@ -739,6 +749,10 @@ class SearchExecutor:
             or not selected.input_matches_suggestion
             or not self._suggestion_matches(item.value, selected.suggestion_text)
         ):
+            try:
+                self._driver.reset_autocomplete(observation.token)
+            except Exception:
+                pass
             diagnostic = self._failure_diagnostic(
                 self._current_criteria_model(), SearchSuggestionMissing()
             )
@@ -751,6 +765,8 @@ class SearchExecutor:
                 "selection_required": True,
             }
             raise SearchSuggestionMissing(diagnostic=diagnostic)
+        # Sans cette libération, le champ suivant serait refusé comme « test déjà ouvert ».
+        self._driver.release_autocomplete(observation.token)
         return selected.suggestion_text
 
     def _current_criteria_model(self) -> SearchCriteria:

@@ -1317,11 +1317,14 @@ class PlaywrightBrowser:
         if self._page is None or self._page.is_closed() or self._autocomplete_tester is None:
             raise SearchExecutionError("Navigateur Sidjilcom indisponible.", code="browser_unavailable")
         validate_first_controlled_search(criteria)
+        self._ensure_search_page(config)
+        # Un outil d'autocomplétion neuf par recherche : aucun état d'un essai précédent
+        # (ou de la fenêtre de test) ne peut bloquer les champs de cette recherche.
         driver = PlaywrightSearchDriver(
             self._page,
             config.url,
             lambda mode: self._select_mode_for_search(config, mode),
-            self._autocomplete_tester,
+            AutocompleteTester(PlaywrightAutocompleteDriver(self._page, config.url)),
             timeout_ms=config.navigation_timeout_ms,
         )
         return SearchExecutor(driver).execute(
@@ -1337,6 +1340,18 @@ class PlaywrightBrowser:
             timeout_ms=config.navigation_timeout_ms,
         )
         return driver.observe_results()
+
+    def _ensure_search_page(self, config: SessionConfig) -> None:
+        """Rouvre le formulaire (GET) si le navigateur est resté sur une autre page du portail."""
+        if self._page is None or not is_portal_host(self._page.url, config.url):
+            return
+        if urlsplit(self._page.url).path.rstrip("/") == DEFAULT_ENTERPRISE_SEARCH_ROUTE.rstrip("/"):
+            return
+        self._page.goto(
+            urljoin(config.url, DEFAULT_ENTERPRISE_SEARCH_ROUTE),
+            wait_until="domcontentloaded",
+            timeout=config.navigation_timeout_ms,
+        )
 
     def collect_result_pages(self, config: SessionConfig, max_pages: int) -> list[SearchObservation]:
         """Parcourt les pages suivantes déjà affichées; aucune nouvelle recherche n'est soumise."""
@@ -1387,6 +1402,7 @@ class PlaywrightBrowser:
         """Relève les types et options des contrôles des deux modes; aucun critère n'est saisi."""
         if self._page is None or self._page.is_closed() or self._autocomplete_tester is None:
             raise SearchExecutionError("Navigateur Sidjilcom indisponible.", code="browser_unavailable")
+        self._ensure_search_page(config)
         merged: dict[str, dict[str, object]] = {}
         for mode in (SearchMode.PERSONNE_PHYSIQUE, SearchMode.PERSONNE_MORALE):
             driver = PlaywrightSearchDriver(

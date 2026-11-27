@@ -335,11 +335,8 @@ class TaskManager:
         return row is not None
 
     def controlled_submission_state(self) -> str:
-        """Retourne available/reserved/submitted d'après les traces persistées, sans les modifier."""
+        """Retourne « reserved » si une recherche contrôlée est en cours, sinon « available »."""
         with self.database.connection() as connection:
-            possible = self._possible_submission_search_id(connection)
-            if possible is not None:
-                return "submitted"
             running = connection.execute(
                 "SELECT 1 FROM tasks WHERE task_type = 'sidjilcom_controlled_search' AND status = ? LIMIT 1",
                 (Status.RUNNING,),
@@ -377,8 +374,6 @@ class TaskManager:
         now = utc_now()
         with self.database.connection(immediate=True) as connection:
             state = self._reconcile_controlled_search_reservation(connection)
-            if state == "submitted":
-                raise InvalidTransition("Une soumission réelle ou potentielle existe déjà; ce préparateur ne peut pas être lancé.")
             if state == "reserved":
                 raise InvalidTransition("Une autre recherche contrôlée est déjà réservée et en cours.")
             task = connection.execute(
@@ -428,46 +423,15 @@ class TaskManager:
         ).fetchone()
         return row is not None
 
-    @staticmethod
-    def _possible_submission_search_id(connection: sqlite3.Connection) -> str | None:
-        """Trouve une soumission certaine/possible via état ou étape de soumission persistée."""
-        row = connection.execute(
-            "SELECT s.id FROM searches AS s JOIN tasks AS t ON t.search_id = s.id "
-            "WHERE t.task_type = 'sidjilcom_controlled_search' AND ("
-            "s.status = ? OR t.status = ? OR s.step IN "
-            "('submitting', 'submitted', 'observing_results', 'results_detected', 'no_results', 'result_unknown', 'succeeded', 'completed') "
-            "OR EXISTS (SELECT 1 FROM events AS e WHERE e.search_id = s.id AND e.task_id = t.id "
-            "AND e.message IN ("
-            "'Étape de recherche contrôlée : submitting.', "
-            "'Étape de recherche contrôlée : submitted.', "
-            "'Étape de recherche contrôlée : observing_results.', "
-            "'Étape de recherche contrôlée : results_detected.', "
-            "'Étape de recherche contrôlée : no_results.', "
-            "'Étape de recherche contrôlée : completed.'" "))) "
-            "ORDER BY s.created_at, s.id LIMIT 1",
-            (Status.COMPLETED, Status.COMPLETED),
-        ).fetchone()
-        return str(row["id"]) if row is not None else None
-
     def _reconcile_controlled_search_reservation(self, connection: sqlite3.Connection) -> str:
-        """Répare une ancienne réservation seulement si aucune trace de soumission n'existe."""
-        possible_id = self._possible_submission_search_id(connection)
+        """La réservation ne protège que la recherche en cours : une seule soumission à la fois.
+
+        Une recherche terminée, échouée ou au résultat inconnu n'est jamais relancée (une tâche
+        ne démarre qu'une fois), mais elle n'empêche pas l'utilisateur d'en lancer une nouvelle.
+        """
         claim = connection.execute(
             "SELECT search_id FROM controlled_search_claim WHERE claim_id = 1"
         ).fetchone()
-        if possible_id is not None:
-            if claim is None:
-                connection.execute(
-                    "INSERT INTO controlled_search_claim(claim_id, search_id, claimed_at) VALUES (1, ?, ?)",
-                    (possible_id, utc_now()),
-                )
-            elif claim["search_id"] != possible_id:
-                connection.execute(
-                    "UPDATE controlled_search_claim SET search_id = ?, claimed_at = ? WHERE claim_id = 1",
-                    (possible_id, utc_now()),
-                )
-            return "submitted"
-
         running = connection.execute(
             "SELECT s.id, t.id AS task_id FROM searches AS s JOIN tasks AS t ON t.search_id = s.id "
             "WHERE t.task_type = 'sidjilcom_controlled_search' AND t.status = ? "
@@ -497,8 +461,8 @@ class TaskManager:
             if stale_task is not None:
                 self.database.add_event(
                     connection,
-                    "Ancienne réservation libérée : aucune étape ou trace de soumission réelle/potentielle n'existe; l'historique est conservé.",
-                    level="WARNING", search_id=stale_id, task_id=stale_task["id"],
+                    "Réservation libérée : la recherche n'est plus en cours; l'historique est conservé.",
+                    search_id=stale_id, task_id=stale_task["id"],
                 )
             return "released"
         return "available"
@@ -556,10 +520,6 @@ class TaskManager:
             if task["status"] != Status.PENDING or task["attempts"] != 0:
                 raise InvalidTransition("Cette recherche contrôlée a déjà commencé et ne peut pas être relancée.")
             reservation_state = self._reconcile_controlled_search_reservation(connection)
-            if reservation_state == "submitted":
-                raise InvalidTransition(
-                    "Une soumission Sidjilcom réelle ou potentielle est déjà enregistrée; aucune nouvelle soumission n'est autorisée."
-                )
             if reservation_state == "reserved":
                 raise InvalidTransition("Une autre recherche contrôlée est déjà réservée et en cours.")
             # Transaction BEGIN IMMEDIATE + singleton: un second clic ou processus ne peut acquérir le verrou.

@@ -271,13 +271,18 @@ SELECT_OPTION_CATALOGS: dict[str, tuple[str, ...]] = {
 
 _BASE_CONTROL_MAP: dict[str, ControlMapping] = dict(SIDJILCOM_CONTROL_MAP)
 _MAX_CAPTURED_OPTIONS = 400
+# Option neutre d'une liste (« -- Tous -- », « Choisir… »); partagé avec le contrôle de vacuité JS.
+PLACEHOLDER_OPTION_PATTERN = r"^(?:-+|\.+|tou(?:s|tes)|choisi(?:r|ssez)|s[ée]lectionne(?:r|z)|aucun(?:e)?|indiff[ée]rent)\b|^-+.*-+$"
 
 
 def _clean_option_labels(raw: object) -> tuple[str, ...]:
     if not isinstance(raw, (list, tuple)):
         return ()
     labels = [" ".join(str(item).split())[:160] for item in raw[:_MAX_CAPTURED_OPTIONS]]
-    labels = [label for label in labels if re.search(r"\w", label)]
+    labels = [
+        label for label in labels
+        if re.search(r"\w", label) and not re.search(PLACEHOLDER_OPTION_PATTERN, label, re.I)
+    ]
     # Un libellé dupliqué rendrait la sélection par libellé ambiguë côté pilote.
     return tuple(label for label in labels if labels.count(label) == 1)
 

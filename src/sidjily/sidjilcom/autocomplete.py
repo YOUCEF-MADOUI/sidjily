@@ -350,6 +350,10 @@ class AutocompleteTester:
         except Exception:
             raise AutocompleteTestError("La sélection n'a pas pu être confirmée; aucune recherche n'a été lancée.") from None
 
+    def release(self, token: str) -> None:
+        """Clôt un test dont la sélection est conservée, sans effacer le champ."""
+        self._pending.pop(token, None)
+
     def reset(self, token: str) -> AutocompleteResetResult:
         pending = self._pending.get(token)
         if pending is None:

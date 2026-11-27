@@ -445,10 +445,6 @@ class SidjilyApp:
             return
         try:
             state = self.manager.controlled_submission_state()
-            if state == "submitted":
-                raise InvalidTransition(
-                    "Une soumission réelle ou potentielle est déjà enregistrée; SIDJILY bloque toute nouvelle soumission."
-                )
             if state == "reserved":
                 raise InvalidTransition("Une recherche contrôlée est déjà réservée et en cours.")
             validate_first_controlled_search(criteria)
@@ -1055,8 +1051,9 @@ class SidjilyApp:
                 rows_stored = self.manager.store_search_results(
                     search_id, columns, observation.rows, page=1, links=observation.row_links,
                 )
+            more_announced = observation.result_count is not None and observation.result_count > rows_stored
             collecting_more = (
-                observation.pagination_visible and rows_stored > 0
+                (observation.pagination_visible or more_announced) and rows_stored > 0
                 and self._start_page_collection(search_id, columns, rows_stored)
             )
             report = [

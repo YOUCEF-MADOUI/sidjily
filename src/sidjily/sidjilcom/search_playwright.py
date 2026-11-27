@@ -20,6 +20,7 @@ from sidjily.sidjilcom.autocomplete import (
 )
 from sidjily.sidjilcom.autocomplete_playwright import PlaywrightAutocompleteDriver
 from sidjily.sidjilcom.criteria import (
+    PLACEHOLDER_OPTION_PATTERN,
     MappedCriterion,
     SearchMode,
     REPORTED_FORM_METHOD,
@@ -111,8 +112,9 @@ _RESULTS_DOM_SCRIPT = r"""() => {
         .filter(Boolean).slice(0, 8);
     if (alerts.some(text => expiredPattern.test(text))) sessionExpired = true;
     const pagination = Array.from(document.querySelectorAll(
-        '[aria-label*="page" i], [aria-label*="pagination" i], a[rel="next"], a[rel="prev"]'
-    )).some(visible) || Array.from(document.querySelectorAll('[role="navigation"], nav')).some(element => {
+        '[aria-label*="page" i], [aria-label*="pagination" i], a[rel="next"], a[rel="prev"], ' +
+        '.lfr-pagination, .pagination, .taglib-page-iterator'
+    )).some(visible) || Array.from(document.querySelectorAll('[role="navigation"], nav, [class*="pagination" i]')).some(element => {
         if (!visible(element)) return false;
         const label = String(element.getAttribute('aria-label') || '').toLowerCase();
         const text = String(element.innerText || '').replace(/\s+/gu, ' ').trim().toLowerCase();
@@ -839,10 +841,21 @@ class PlaywrightSearchDriver:
     @staticmethod
     def _is_empty(locator: Any, tag_name: str, input_type: str) -> bool:
         if tag_name == "select":
+            # L'option neutre initiale (« -- Tous -- », valeur 0 ou -1) compte comme vide;
+            # toute autre option choisie reste un préremplissage.
             try:
                 return locator.evaluate(
-                    "element => element.selectedIndex < 0 || element.selectedOptions.length === 0 || " +
-                    "Array.from(element.selectedOptions).every(option => !String(option.value || '').trim())"
+                    """(element, placeholder) => {
+                        if (element.selectedIndex < 0 || element.selectedOptions.length === 0) return true;
+                        const pattern = new RegExp(placeholder, 'i');
+                        return Array.from(element.selectedOptions).every(option => {
+                            const value = String(option.value || '').trim();
+                            if (!value) return true;
+                            const text = String(option.textContent || '').trim();
+                            return option.index === 0 && (value === '0' || value === '-1' || !text || pattern.test(text));
+                        });
+                    }""",
+                    PLACEHOLDER_OPTION_PATTERN,
                 )
             except Exception:
                 return False
@@ -886,11 +899,25 @@ class PlaywrightSearchDriver:
             raise SearchFormUnsafe() from None
 
     def read_control_value(self, control: SearchControl) -> str:
-        locator = self._require_control(control, control.tag_name, control.input_type)
+        # Relecture après remplissage : le contrôle n'est évidemment plus vide ici.
+        if self.page_marker() != self._active_marker or control.handle is None:
+            raise SearchFormUnsafe()
         try:
-            return locator.input_value(timeout=1_000)
+            if not control.handle.is_visible() or not control.handle.is_enabled():
+                raise SearchFormUnsafe()
+            return self._displayed_value(control.handle, control.tag_name)
+        except SearchExecutionError:
+            raise
         except Exception:
             raise SearchFormUnsafe("La valeur du contrôle n'a pas pu être vérifiée dans le DOM.", code="dom_value_unreadable") from None
+
+    @staticmethod
+    def _displayed_value(locator: Any, tag_name: str) -> str:
+        # Une liste est comparée au libellé choisi, sa valeur technique (« 3 ») n'ayant pas de sens ici.
+        if tag_name == "select":
+            selected = locator.locator("option:checked").all_text_contents()
+            return selected[0].strip() if len(selected) == 1 else ""
+        return locator.input_value(timeout=1_000)
 
     def failure_diagnostic(self) -> dict[str, object]:
         return dict(self._last_diagnostic)
@@ -1076,6 +1103,9 @@ class PlaywrightSearchDriver:
         except AutocompleteTestError:
             raise SearchFormUnsafe() from None
 
+    def release_autocomplete(self, token: str) -> None:
+        self._autocomplete_tester.release(token)
+
     def submit_search(
         self, form: SearchFormSnapshot, *, on_attempt: Callable[[], None] | None = None
     ) -> None:
@@ -1172,7 +1202,8 @@ class PlaywrightSearchDriver:
                     field = matching.nth(index)
                     if field.get_attribute("name") == name:
                         try:
-                            values.append(field.input_value(timeout=1_000))
+                            tag = str(field.evaluate("element => element.tagName.toLowerCase()"))
+                            values.append(self._displayed_value(field, tag))
                         except Exception:
                             values.append("")
                 matches = len(values) == 1 and values[0].strip() == expected.strip()

@@ -69,7 +69,7 @@ Après confirmation, SIDJILY vérifie le mode, le portlet et formulaire parent, 
 
 **Export.** **Exporter CSV** produit un fichier UTF-8 avec séparateur `;` (ouverture directe dans Excel en français) : colonnes du tableau, puis une colonne par champ de fiche lu, puis le lien de la fiche.
 
-La réservation persistante autorise une seule soumission possible à la fois. Une interruption au clic ou après lui garde la réservation et interdit tout nouvel essai; si l'étape est `result_unknown`, ne cliquez pas à nouveau sur **Lancer**. Sélectionnez la recherche et utilisez **Diagnostiquer le résultat (lecture seule)** uniquement si la page Sidjilcom est encore affichée; ce diagnostic n'envoie pas de recherche et son rapport s'ajoute à la fiche. Un échec démontré avant le clic devient `failed_before_submission` et n'est pas relancé automatiquement; un résultat non observable après le clic devient `result_unknown` et ne doit jamais être soumis de nouveau.
+Une seule recherche peut être en cours à la fois, et une recherche donnée n'est jamais relancée : chaque nouveau lancement crée une nouvelle recherche dans l'historique. Si l'étape d'une recherche est `result_unknown`, la soumission a pu avoir lieu; vérifiez dans Chromium avant d'en lancer une autre identique. Sélectionnez la recherche et utilisez **Diagnostiquer le résultat (lecture seule)** uniquement si la page Sidjilcom est encore affichée; ce diagnostic n'envoie pas de recherche et son rapport s'ajoute à la fiche. Un échec démontré avant le clic devient `failed_before_submission` et n'est pas relancé automatiquement; un résultat non observable après le clic devient `result_unknown` et ne doit jamais être soumis de nouveau.
 
 **Non testé sur le portail réel.** La capture des listes, la détection du lien « page suivante » et l'extraction des fiches s'appuient sur des structures HTML courantes (Liferay) et sont validées par des tests simulés. Le premier essai depuis votre PC dira si le portail les expose ainsi : par exemple, un lien de fiche en `javascript:` ne peut pas être suivi, et la fenêtre **Résultats et fiches** l'indique. Ne partagez jamais votre profil navigateur, cookies, mots de passe ni jetons.
 
@@ -91,6 +91,8 @@ python -m compileall -q src tests
 ```
 
 Les tests de session injectent un navigateur simulé et n'ont besoin ni d'un compte Sidjilcom, ni d'un navigateur Playwright installé; ils n'envoient pas de requête au portail.
+
+`tests/test_e2e_mock_portal.py` pilote en plus le vrai Chromium contre une réplique locale du portail (`tests/mock_portal.py`, données fictives servies sous l'hôte officiel sans réseau) : connexion, capture des listes, recherche avec deux autocomplétions et une liste, pagination, fiches, nouvelle recherche. Ces tests sont ignorés si Chromium n'est pas disponible (`SIDJILY_SKIP_E2E=1` pour les désactiver, `SIDJILY_TEST_CHROMIUM=<chemin>` pour indiquer un Chromium). La réplique suit la structure relevée, pas le portail réel : un écart du vrai site reste possible.
 
 ## Périmètre actuel
 

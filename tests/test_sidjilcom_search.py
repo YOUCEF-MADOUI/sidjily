@@ -47,6 +47,7 @@ class FakeSearchDriver:
         self.autocomplete_token = "token"
         self.autocomplete_selected: list[int] = []
         self.autocomplete_resets: list[str] = []
+        self.autocomplete_releases: list[str] = []
         self._last_suggestions: tuple[str, ...] = ()
         self._last_autocomplete_field = ""
         self.filled_values: dict[str, str] = {}
@@ -223,6 +224,9 @@ class FakeSearchDriver:
 
     def reset_autocomplete(self, token: str) -> None:
         self.autocomplete_resets.append(token)
+
+    def release_autocomplete(self, token: str) -> None:
+        self.autocomplete_releases.append(token)
 
     def submit_search(self, form: SearchFormSnapshot, *, on_attempt=None) -> None:
         if on_attempt is not None:
