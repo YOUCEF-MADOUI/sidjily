@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import unicodedata
 from dataclasses import dataclass, replace
@@ -690,6 +691,42 @@ class BrowserAdapter(Protocol):
     def close(self) -> None: ...
 
 
+class BrowserProfileInUse(RuntimeError):
+    """Le profil SIDJILY est déjà ouvert par un autre Chromium (autre instance de SIDJILY)."""
+
+
+def browser_profile_in_use(profile: Path) -> bool:
+    """Détecte le verrou qu'un Chromium vivant garde sur son répertoire de profil.
+
+    Windows : Chromium garde `lockfile` ouvert sans partage en écriture. Linux/macOS :
+    `SingletonLock` est un lien « hôte-pid » vers un processus encore vivant.
+    """
+    lockfile = profile / "lockfile"
+    if lockfile.exists():
+        try:
+            with open(lockfile, "ab"):
+                pass
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+    singleton = profile / "SingletonLock"
+    if singleton.is_symlink():
+        try:
+            target = os.readlink(singleton)
+            pid = int(target.rsplit("-", 1)[-1])
+        except (OSError, ValueError):
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True
+        return True
+    return False
+
+
 class PlaywrightBrowser:
     """Navigateur Chromium visible, lancé dans un répertoire de profil SIDJILY dédié."""
 
@@ -711,6 +748,8 @@ class PlaywrightBrowser:
         except OSError:
             # Les ACL Windows sont gérées par le profil utilisateur du système.
             pass
+        if browser_profile_in_use(profile):
+            raise BrowserProfileInUse()
         self._playwright = sync_playwright().start()
         self._context = self._playwright.chromium.launch_persistent_context(
             user_data_dir=str(profile),

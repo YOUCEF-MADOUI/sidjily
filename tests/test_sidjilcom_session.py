@@ -178,7 +178,7 @@ class FakeBrowser:
 class SessionConfigTests(unittest.TestCase):
     def test_defaults_use_official_url_visible_browser_and_dedicated_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            with patch.dict(os.environ, {"XDG_DATA_HOME": temp_dir}, clear=False):
+            with patch.dict(os.environ, {"XDG_DATA_HOME": temp_dir, "LOCALAPPDATA": temp_dir}, clear=False):
                 config = SessionConfig()
                 self.assertEqual(config.url, DEFAULT_SIDJILCOM_URL)
                 self.assertFalse(config.headless)
@@ -192,7 +192,9 @@ class SessionConfigTests(unittest.TestCase):
                 "SIDJILY_BROWSER_PROFILE": temp_dir,
                 "SIDJILY_BROWSER_HEADLESS": "false",
             }
-            with patch.dict(os.environ, env, clear=True):
+            # Conserver les variables qui donnent le dossier personnel (Windows : USERPROFILE).
+            keep = {k: v for k, v in os.environ.items() if k in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "SYSTEMROOT")}
+            with patch.dict(os.environ, {**keep, **env}, clear=True):
                 config = SessionConfig.from_environment()
         self.assertEqual(config.profile_path, Path(temp_dir))
         self.assertFalse(config.headless)
@@ -209,7 +211,7 @@ class SessionConfigTests(unittest.TestCase):
 
     def test_profile_path_helper_uses_sidjily_user_data_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            with patch.dict(os.environ, {"XDG_DATA_HOME": temp_dir}, clear=False):
+            with patch.dict(os.environ, {"XDG_DATA_HOME": temp_dir, "LOCALAPPDATA": temp_dir}, clear=False):
                 self.assertEqual(browser_profile_dir(), Path(temp_dir) / "SIDJILY" / "browser_profile")
 
     def test_profile_inside_git_worktree_is_rejected(self) -> None:
@@ -667,6 +669,30 @@ class SessionManagerTests(unittest.TestCase):
             self.assertNotIn(secret, rendered_logs)
             self.assertNotIn(secret, error_message)
             self.assertIn("Impossible", error_message)
+
+    def test_profile_already_open_by_another_instance_gives_a_clear_message(self) -> None:
+        from sidjily.sidjilcom.browser import BrowserProfileInUse
+
+        browser = FakeBrowser(open_error=BrowserProfileInUse())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self.make_manager(browser, temp_dir)
+            manager.connect()
+            self.wait_for_state(manager, SessionState.ERROR)
+            self.assertIn("déjà ouvert par une autre instance", manager.snapshot.message)
+            self.assertTrue(manager.close(timeout=1))
+
+    def test_locked_profile_is_detected_before_launching_chromium(self) -> None:
+        from sidjily.sidjilcom import browser as browser_module
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile = Path(temp_dir)
+            self.assertFalse(browser_module.browser_profile_in_use(profile))
+            (profile / "lockfile").write_bytes(b"")
+            # Verrou abandonné (Chromium fermé) : le fichier s'ouvre en écriture.
+            self.assertFalse(browser_module.browser_profile_in_use(profile))
+            # Chromium vivant sous Windows : ouverture en écriture refusée (partage lecture seule).
+            with patch.object(browser_module, "open", side_effect=PermissionError(13, "denied"), create=True):
+                self.assertTrue(browser_module.browser_profile_in_use(profile))
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from sidjily.sidjilcom.autocomplete import (
 )
 from sidjily.sidjilcom.browser import (
     BrowserAdapter,
+    BrowserProfileInUse,
     PageDiagnostics,
     PlaywrightBrowser,
     SearchModeAnalysisError,
@@ -326,7 +327,13 @@ class SidjilcomSessionManager:
         except Exception as exc:  # détails volontairement exclus des logs et de l'interface
             failure = exc
             if not self._disconnect_requested.is_set():
-                if isinstance(exc, ModuleNotFoundError) and exc.name == "playwright":
+                if isinstance(exc, BrowserProfileInUse):
+                    self._set_state(
+                        SessionState.ERROR,
+                        "Le navigateur SIDJILY est déjà ouvert par une autre instance de SIDJILY. "
+                        "Fermez l'autre fenêtre SIDJILY (ou son Chromium) puis réessayez.",
+                    )
+                elif isinstance(exc, ModuleNotFoundError) and exc.name == "playwright":
                     self._set_state(SessionState.ERROR, "Playwright n'est pas installé. Réinstallez SIDJILY avec ses dépendances.")
                 else:
                     self._logger.error("Échec de session navigateur (type=%s).", type(exc).__name__)
