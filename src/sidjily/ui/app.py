@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import io
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
@@ -16,9 +15,12 @@ from sidjily.sidjilcom.autocomplete import (
     AutocompleteTestStatus,
 )
 from sidjily.sidjilcom.criteria import (
+    SIDJILCOM_CONTROL_MAP,
+    ComponentType,
     CriteriaValidationError,
     SearchCriteria,
     SearchMode,
+    apply_observed_controls,
     criteria_from_mapping,
     criteria_to_mapping,
     format_criteria_preview,
@@ -75,6 +77,9 @@ CONTROLLED_STEP_LABELS = {
     "failed": "Échec avant soumission",
 }
 
+OBSERVED_CONTROLS_SETTING = "sidjilcom_observed_controls"
+MAX_RESULT_PAGES = 50
+
 FORM_DIAGNOSTIC_STAGES = {
     "Après navigation": "after_navigation",
     "Après sélection de la Wilaya": "after_wilaya_selection",
@@ -99,7 +104,12 @@ class SidjilyApp:
         self._pending_preparation_requested = False
         self._pending_preparation_draft: Search | None = None
         self._pending_navigation_action = ""
+        self._pending_pages_context: tuple[str, tuple[str, ...], int] | None = None
         self._closing = False
+        try:
+            apply_observed_controls(self.manager.load_setting(OBSERVED_CONTROLS_SETTING, {}))
+        except Exception:
+            pass
         self.root.title("SIDJILY — Gestion des recherches")
         self.root.geometry("940x600")
         self.root.minsize(760, 460)
@@ -169,11 +179,17 @@ class SidjilyApp:
             search_buttons, text="Continuer la recherche", command=self.resume_selected
         )
         self.continue_button.pack(side="left")
+        self.capture_controls_button = ttk.Button(
+            search_buttons, text="Capturer les listes du portail", command=self._capture_search_controls
+        )
+        self.capture_controls_button.pack(side="left", padx=8)
+        self.catalog_status = ttk.Label(search_panel, text=self._catalog_status_text(), foreground="#555555")
+        self.catalog_status.pack(anchor="w", pady=(7, 0))
         ttk.Label(
             search_panel,
-            text="L'aperçu et l'enregistrement sont locaux. Le lancement réel est limité au premier test strictement validé et confirmé.",
+            text="L'aperçu et l'enregistrement sont locaux. Une recherche réelle n'est lancée qu'après confirmation explicite.",
             foreground="#555555",
-        ).pack(anchor="w", pady=(7, 0))
+        ).pack(anchor="w", pady=(2, 0))
 
         self.developer_toggle = ttk.Button(
             container, text="Outils développeur  ▸", command=self._toggle_developer_tools
@@ -564,6 +580,96 @@ class SidjilyApp:
             "Ouverture de la recherche Sidjilcom (aucune soumission)",
         )
 
+    @staticmethod
+    def _catalog_status_text() -> str:
+        enabled = [
+            mapping.label for mapping in SIDJILCOM_CONTROL_MAP.values()
+            if mapping.component_type is ComponentType.SELECT and mapping.options
+        ]
+        if not enabled:
+            return ("Listes déroulantes : non capturées. Ouvrez « Trouver une entreprise » puis "
+                    "« Capturer les listes du portail » pour les activer.")
+        return f"Listes déroulantes actives ({len(enabled)}) : " + ", ".join(sorted(set(enabled)))
+
+    def _capture_search_controls(self) -> None:
+        if self.session_manager.snapshot.state != SessionState.CONNECTED:
+            messagebox.showinfo(
+                "Session requise",
+                "Connectez-vous dans Chromium SIDJILY et ouvrez « Trouver une entreprise » avant la capture. "
+                "La capture lit seulement les listes du formulaire; aucune recherche n'est lancée.",
+                parent=self.root,
+            )
+            return
+        if self._pending_session_operation is not None and not self._pending_session_operation.done():
+            return
+        self._pending_navigation_action = "capture_controls"
+        self._request_session_operation(
+            self.session_manager.capture_search_controls(),
+            "Capture des listes du formulaire (aucune recherche ne sera soumise)",
+        )
+
+    def _finish_controls_capture(self, future: Any) -> None:
+        try:
+            observed = future.result()
+        except Exception as exc:
+            message = str(exc) if isinstance(exc, (SessionOperationError, SearchExecutionError)) else ""
+            self.diagnostic_output.configure(
+                text="Capture impossible; ouvrez « Trouver une entreprise » puis réessayez. " + message
+            )
+            self._refresh_session_status()
+            return
+        updated = apply_observed_controls(observed)
+        self.manager.save_setting(OBSERVED_CONTROLS_SETTING, observed)
+        lines = ["CAPTURE DES LISTES DU FORMULAIRE SIDJILCOM", "Aucun critère saisi, aucune recherche soumise.", ""]
+        for criterion in sorted(observed):
+            info = observed[criterion]
+            mapping = SIDJILCOM_CONTROL_MAP.get(criterion)
+            label = mapping.label if mapping else criterion
+            state = "activé" if criterion in updated else "inchangé"
+            options = info.get("options") or []
+            detail = f"{len(options)} option(s)" if info.get("tag") == "select" else f"{info.get('tag')}/{info.get('type')}"
+            lines.append(f"- {label} : {detail} · {state}")
+        self._set_diagnostic_report("\n".join(lines))
+        self.catalog_status.configure(text=self._catalog_status_text())
+        self.diagnostic_output.configure(text=f"Capture terminée : {len(updated)} champ(s) activé(s).")
+        self._refresh_session_status()
+
+    def _finish_page_collection(self, future: Any) -> None:
+        context = self._pending_pages_context
+        self._pending_pages_context = None
+        if context is None:
+            return
+        search_id, columns, total = context
+        pages_read = 1
+        interrupted = False
+        try:
+            pages = future.result()
+        except Exception:
+            pages = []
+            interrupted = True
+        for offset, page in enumerate(pages, start=2):
+            total += self.manager.store_search_results(search_id, columns, page.rows, page=offset)
+            pages_read = offset
+        suffix = " Pagination interrompue; les lignes déjà lues sont conservées." if interrupted else ""
+        self.diagnostic_output.configure(
+            text=f"Recherche terminée; {total} ligne(s) collectée(s) sur {pages_read} page(s).{suffix}"
+        )
+        if self._diagnostic_report:
+            self._set_diagnostic_report(
+                self._diagnostic_report + f"\nTotal collecté : {total} ligne(s) sur {pages_read} page(s).{suffix}"
+            )
+        self.refresh()
+        self._refresh_session_status()
+
+    def _start_page_collection(self, search_id: str, columns: tuple[str, ...], rows_so_far: int) -> bool:
+        if self._pending_session_operation is not None and not self._pending_session_operation.done():
+            return False
+        self._pending_pages_context = (search_id, columns, rows_so_far)
+        self._pending_navigation_action = "collect_pages"
+        self._pending_session_operation = self.session_manager.collect_result_pages(MAX_RESULT_PAGES - 1)
+        self._refresh_session_status()
+        return True
+
     def _diagnose_page(self) -> None:
         self._request_session_operation(self.session_manager.diagnose_page(), "Diagnostic de la page")
 
@@ -721,6 +827,12 @@ class SidjilyApp:
         self._pending_session_operation = None
         navigation_action = self._pending_navigation_action
         self._pending_navigation_action = ""
+        if navigation_action == "capture_controls":
+            self._finish_controls_capture(future)
+            return
+        if navigation_action == "collect_pages":
+            self._finish_page_collection(future)
+            return
         try:
             result = future.result()
         except SessionOperationError as exc:
@@ -868,32 +980,17 @@ class SidjilyApp:
         else:
             summary = observation.to_mapping()
             self.manager.complete_controlled_search(search_id, summary)
+            self.selected_search_id = search_id
             rows_stored = 0
             columns = observation.columns
             if observation.rows and columns:
                 rows_stored = self.manager.store_search_results(
                     search_id, columns, observation.rows, page=1,
                 )
-            pages_collected = 1
-            if observation.pagination_visible and rows_stored > 0:
-                max_pages = 50
-                for page_num in range(2, max_pages + 1):
-                    try:
-                        navigated = self.session.navigate_next_page().result(timeout=15)
-                        if not navigated:
-                            break
-                        page_obs = self.session.diagnose_search_results().result(timeout=10)
-                        if page_obs.session_expired or not page_obs.rows:
-                            break
-                        page_stored = self.manager.store_search_results(
-                            search_id, columns, page_obs.rows, page=page_num,
-                        )
-                        rows_stored += page_stored
-                        pages_collected = page_num
-                        if not page_obs.pagination_visible or page_stored == 0:
-                            break
-                    except Exception:
-                        break
+            collecting_more = (
+                observation.pagination_visible and rows_stored > 0
+                and self._start_page_collection(search_id, columns, rows_stored)
+            )
             report = [
                 "RAPPORT — RECHERCHE SIDJILCOM",
                 f"ID : {search_id}",
@@ -906,13 +1003,18 @@ class SidjilyApp:
                 f"Tableaux visibles : {observation.table_count}",
                 f"Lignes du premier tableau : {observation.row_count}",
                 "Colonnes : " + (" · ".join(columns) if columns else "aucune détectée"),
-                f"Lignes collectées : {rows_stored} (sur {pages_collected} page(s))",
+                f"Lignes collectées (page 1) : {rows_stored}",
                 f"Pagination visible : {'oui' if observation.pagination_visible else 'non'}",
                 f"Message aucun résultat : {'oui' if observation.no_results else 'non'}",
                 "Erreurs : " + (" · ".join(observation.errors) if observation.errors else "aucune détectée"),
             ]
             self._set_diagnostic_report("\n".join(report))
-            status_text = f"Recherche terminée; {rows_stored} ligne(s) collectée(s) sur {pages_collected} page(s)." if rows_stored else "Recherche terminée; aucune ligne collectée."
+            if collecting_more:
+                status_text = f"Page 1 : {rows_stored} ligne(s) collectée(s); parcours des pages suivantes en cours…"
+            elif rows_stored:
+                status_text = f"Recherche terminée; {rows_stored} ligne(s) collectée(s)."
+            else:
+                status_text = "Recherche terminée; aucune ligne collectée."
             self.diagnostic_output.configure(text=status_text)
         self.refresh()
         self._refresh_session_status()
@@ -1090,10 +1192,6 @@ class _NewSearchDialog:
         "Personne physique": SearchMode.PERSONNE_PHYSIQUE,
         "Personne morale": SearchMode.PERSONNE_MORALE,
     }
-    _DISABLED_SELECTS = frozenset({
-        "forme_juridique", "secteur_activite", "conformite_rc", "etat_commercant",
-        "presume", "qualite",
-    })
     _DATE_FIELDS = frozenset({
         "date_inscription_du", "date_inscription_au", "date_naissance", "date_naissance_dirigeant",
     })
@@ -1149,7 +1247,7 @@ class _NewSearchDialog:
             text=(
                 "Choisissez obligatoirement une personne physique ou morale. "
                 "Wilaya et Commune utilisent le critère conjoint Sidjilcom confirmé; aucun endpoint ni liste séparée n'est supposé. "
-                "Dates au format AAAA-MM-JJ; les listes dont les options ne sont pas connues restent désactivées."
+                "Dates au format AAAA-MM-JJ; les listes non encore capturées depuis le portail restent grisées."
             ),
             wraplength=930,
             justify="left",
@@ -1340,48 +1438,75 @@ class _NewSearchDialog:
             )
             field_index += 1
 
+    def _criterion_path(self, key: str) -> str:
+        if key in self._COMMON_KEYS:
+            return key
+        mode = self._MODE_BY_LABEL.get(self.mode.get())
+        prefix = "physique" if mode is SearchMode.PERSONNE_PHYSIQUE else "morale"
+        return f"{prefix}.{key}"
+
+    @staticmethod
+    def _mapping_kind(path: str) -> str:
+        mapping = SIDJILCOM_CONTROL_MAP.get(path)
+        if mapping is None:
+            return "text"
+        if mapping.component_type is ComponentType.SELECT:
+            return "select" if mapping.options and mapping.input_semantics_confirmed else "select_unknown"
+        if mapping.component_type is ComponentType.UNCONFIRMED or not mapping.input_semantics_confirmed:
+            return "unconfirmed"
+        return "text"
+
     def _field_kind(self, key: str) -> str:
-        if key in self._DISABLED_SELECTS:
-            return "select"
         if key in self._DATE_FIELDS:
             return "date"
         if key in CONFIRMED_AUTOCOMPLETE_FIELDS or key in {"activite", "commune_wilaya", "nationalite"}:
             return "autocomplete"
-        return "text"
+        return self._mapping_kind(self._criterion_path(key))
+
+    @staticmethod
+    def _input_widget(parent: tk.Misc, variable: tk.StringVar, kind: str, path: str, width: int) -> tk.Widget:
+        if kind == "select":
+            options = SIDJILCOM_CONTROL_MAP[path].options
+            return ttk.Combobox(parent, textvariable=variable, values=("", *options), state="readonly", width=width)
+        if kind in ("select_unknown", "unconfirmed"):
+            return ttk.Entry(parent, textvariable=variable, width=width, state="disabled")
+        return ttk.Entry(parent, textvariable=variable, width=width)
 
     def _add_field(self, parent: ttk.LabelFrame, key: str, *, row: int, column: int) -> None:
         label = FIELD_LABELS.get(key, key.replace("_", " ").capitalize())
         kind = self._field_kind(key)
         if kind == "autocomplete":
             label += " · saisie locale"
-        elif kind == "select":
-            label += " · options non confirmées"
+        elif kind == "select_unknown":
+            label += " · liste à capturer"
+        elif kind == "unconfirmed":
+            label += " · non confirmé"
         ttk.Label(parent, text=label).grid(
             row=row, column=column, sticky="w", padx=(2, 7), pady=4
         )
-        variable = self._variables[key]
-        if kind == "select":
-            widget = ttk.Combobox(parent, textvariable=variable, values=(), state="disabled", width=34)
-        else:
-            widget = ttk.Entry(parent, textvariable=variable, width=42)
+        widget = self._input_widget(parent, self._variables[key], kind, self._criterion_path(key), 40)
         widget.grid(row=row, column=column + 1, sticky="ew", padx=(0, 14), pady=4)
 
     def _add_number_components(self, parent: ttk.LabelFrame, row: int) -> None:
         box = ttk.LabelFrame(parent, text=FIELD_LABELS["numero_inscription"], padding=6)
         box.grid(row=row, column=0, columnspan=4, sticky="ew", pady=(5, 3))
+        disabled = 0
         for index in range(1, 6):
             key = f"nrc{index}"
+            path = f"numero_inscription.{key}"
+            kind = self._mapping_kind(path)
+            disabled += kind in ("select_unknown", "unconfirmed")
             ttk.Label(box, text=key).grid(row=0, column=(index - 1) * 2, padx=(2, 3), sticky="e")
-            state = "disabled" if index in (2, 5) else "normal"
-            ttk.Entry(
-                box, textvariable=self._number_variables[key], width=12, state=state
-            ).grid(row=0, column=(index - 1) * 2 + 1, padx=(0, 8), sticky="ew")
-        ttk.Label(
-            box,
-            text="Composants affichés séparément; leur signification métier n'est pas interprétée.",
-            wraplength=850,
-            foreground="#555555",
-        ).grid(row=1, column=0, columnspan=10, sticky="w", pady=(5, 0))
+            self._input_widget(box, self._number_variables[key], kind, path, 12).grid(
+                row=0, column=(index - 1) * 2 + 1, padx=(0, 8), sticky="ew"
+            )
+        note = "Saisissez chaque composant tel qu'il apparaît sur le portail."
+        if disabled:
+            note = ("Composants grisés : type non encore observé sur le portail. "
+                    "Utilisez « Capturer les listes du portail » pour les activer.")
+        ttk.Label(box, text=note, wraplength=850, foreground="#555555").grid(
+            row=1, column=0, columnspan=10, sticky="w", pady=(5, 0)
+        )
 
     def _toggle_advanced(self) -> None:
         if self._advanced_visible:

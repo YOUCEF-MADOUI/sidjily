@@ -866,6 +866,24 @@ class TaskManager:
                 )
         return stored
 
+    def save_setting(self, key: str, value: Any) -> None:
+        with self.database.connection(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO settings(key, value_json, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+                (key, self.database.encode_json(value), utc_now()),
+            )
+
+    def load_setting(self, key: str, default: Any = None) -> Any:
+        with self.database.connection() as connection:
+            row = connection.execute("SELECT value_json FROM settings WHERE key = ?", (key,)).fetchone()
+        if row is None:
+            return default
+        try:
+            return json.loads(row["value_json"])
+        except (TypeError, ValueError):
+            return default
+
     def get_search_results(self, search_id: str) -> list[dict[str, Any]]:
         with self.database.connection() as connection:
             rows = connection.execute(

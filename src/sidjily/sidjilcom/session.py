@@ -245,9 +245,13 @@ class SidjilcomSessionManager:
         """Sélectionner une option observée puis s'arrêter sans soumettre le formulaire."""
         return self._submit_operation("autocomplete_select", token, suggestion_index, require_connected=True)
 
-    def navigate_next_page(self) -> Future[bool]:
-        """Clic sur le lien de page suivante dans les résultats."""
-        return self._submit_operation("navigate_next_page", require_connected=True)
+    def collect_result_pages(self, max_pages: int = 50) -> Future[list[SearchObservation]]:
+        """Parcourt les pages de résultats suivantes déjà affichées, sans nouvelle soumission."""
+        return self._submit_operation("collect_result_pages", max_pages, require_connected=True)
+
+    def capture_search_controls(self) -> Future[dict[str, dict[str, object]]]:
+        """Relève les listes et types de contrôles des deux formulaires, sans saisie ni soumission."""
+        return self._submit_operation("capture_search_controls", require_connected=True)
 
     def reset_autocomplete_test(self, token: str) -> Future[AutocompleteResetResult]:
         """Effacer explicitement la valeur temporaire du champ de test."""
@@ -392,10 +396,14 @@ class SidjilcomSessionManager:
                     command.future.set_result(result)
                 return
 
-            if command.name == "navigate_next_page":
+            if command.name in ("collect_result_pages", "capture_search_controls"):
                 if self.snapshot.state != SessionState.CONNECTED:
                     raise SessionNotConnected()
-                result = browser.navigate_next_page(self.config)
+                if command.name == "collect_result_pages":
+                    (max_pages,) = command.arguments
+                    result = browser.collect_result_pages(self.config, max_pages)
+                else:
+                    result = browser.capture_search_controls(self.config)
                 if not command.future.done():
                     command.future.set_result(result)
                 return

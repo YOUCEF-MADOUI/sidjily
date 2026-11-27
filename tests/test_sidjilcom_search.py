@@ -62,6 +62,7 @@ class FakeSearchDriver:
         self.final_value_overrides: dict[str, str] = {}
         self.button_enabled = True
         self.observation_error = False
+        self.select_options: dict[str, tuple[str, ...]] = {}
         self.result = SearchObservation(
             title="Résultats de recherche",
             sanitized_url=self.marker,
@@ -96,7 +97,7 @@ class FakeSearchDriver:
                 empty=True,
                 class_names=("yui3-aclist-input",) if item.component_type is ComponentType.AUTOCOMPLETE else (),
                 aria_autocomplete="list" if item.component_type is ComponentType.AUTOCOMPLETE else None,
-                option_labels=(),
+                option_labels=self.select_options.get(item.criterion, ()),
                 handle=item.criterion,
             )
             for index, item in enumerate(criteria)

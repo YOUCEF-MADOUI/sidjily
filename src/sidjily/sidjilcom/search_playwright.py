@@ -174,19 +174,23 @@ _NEXT_PAGE_SCRIPT = r"""() => {
         }
         return !!element.getClientRects().length;
     };
-    const nextLink = document.querySelector('a[rel="next"]');
-    if (nextLink && visible(nextLink)) { nextLink.click(); return {clicked: true, method: 'rel_next'}; }
+    const usable = el => visible(el) && !el.hasAttribute('disabled') &&
+        !el.closest('.disabled, [aria-disabled="true"]');
+    const nextLink = Array.from(document.querySelectorAll('a[rel="next"]')).filter(usable);
+    if (nextLink.length === 1) { nextLink[0].click(); return {clicked: true, method: 'rel_next'}; }
     const nextByLabel = Array.from(document.querySelectorAll(
-        '[aria-label*="suivant" i], [aria-label*="next" i]'
-    )).filter(el => visible(el) && (el.tagName === 'A' || el.tagName === 'BUTTON'));
+        'a[aria-label*="suivant" i], a[aria-label*="next" i], button[aria-label*="suivant" i], button[aria-label*="next" i]'
+    )).filter(usable);
     if (nextByLabel.length === 1) { nextByLabel[0].click(); return {clicked: true, method: 'aria_label'}; }
-    const navs = Array.from(document.querySelectorAll('[role="navigation"], nav')).filter(visible);
-    for (const nav of navs) {
-        const links = Array.from(nav.querySelectorAll('a, button')).filter(visible);
-        const nextTextLink = links.find(el => /suivant|next|»|›/i.test(
-            (el.innerText || el.textContent || '').trim()
+    const containers = Array.from(document.querySelectorAll(
+        '[role="navigation"], nav, .lfr-pagination, .pagination, [class*="pagination" i]'
+    )).filter(visible);
+    for (const container of containers) {
+        const links = Array.from(container.querySelectorAll('a, button')).filter(usable);
+        const candidates = links.filter(el => /^(?:suivant(?:e)?|page suivante|next|»|›|>)$/i.test(
+            (el.innerText || el.textContent || '').replace(/\s+/gu, ' ').trim()
         ));
-        if (nextTextLink) { nextTextLink.click(); return {clicked: true, method: 'text_match'}; }
+        if (candidates.length >= 1) { candidates[0].click(); return {clicked: true, method: 'text_match'}; }
     }
     return {clicked: false};
 }"""
@@ -284,6 +288,65 @@ class PlaywrightSearchDriver:
             return ""
         source = f"{sanitize_current_url(self._page.url, self._portal_url)}\\0{title}"
         return hashlib.sha256(source.encode("utf-8", errors="replace")).hexdigest()
+
+    def capture_controls(self, mode: SearchMode) -> dict[str, dict[str, object]]:
+        """Relève type et options des contrôles connus du mode, sans rien saisir ni soumettre."""
+        self.select_mode(mode)
+        criteria = [
+            key for key, mapping in SIDJILCOM_CONTROL_MAP.items()
+            if mode in mapping.modes and mapping.name_suffix
+        ]
+        best: dict[str, dict[str, object]] = {}
+        try:
+            for frame in list(self._page.frames):
+                forms = frame.locator("form")
+                for form_index in range(min(forms.count(), 30)):
+                    form = forms.nth(form_index)
+                    if not form.is_visible():
+                        continue
+                    if (form.get_attribute("method") or "get").strip().casefold() != REPORTED_FORM_METHOD.casefold():
+                        continue
+                    if not self._parent_portlet(form).get("confirmed", False):
+                        continue
+                    locators = form.locator("input[name], select[name], textarea[name]")
+                    named: list[tuple[Any, str]] = []
+                    for index in range(min(locators.count(), 200)):
+                        locator = locators.nth(index)
+                        try:
+                            name = locator.get_attribute("name") or ""
+                            if name and locator.is_visible():
+                                named.append((locator, name))
+                        except Exception:
+                            continue
+                    observed: dict[str, dict[str, object]] = {}
+                    for criterion in criteria:
+                        suffix = (SIDJILCOM_CONTROL_MAP[criterion].name_suffix or "").casefold()
+                        matches = [locator for locator, name in named if name.casefold().endswith(suffix)]
+                        if len(matches) != 1:
+                            continue
+                        locator = matches[0]
+                        tag_name = str(locator.evaluate("element => element.tagName.toLowerCase()"))
+                        input_type = (
+                            locator.get_attribute("type") or ("select-one" if tag_name == "select" else "text")
+                        ).casefold()
+                        options: list[str] = []
+                        if tag_name == "select":
+                            options = [
+                                sanitize_metadata_text(value, 160)
+                                for value in locator.locator("option").all_text_contents()[:400]
+                            ]
+                        observed[criterion] = {"tag": tag_name, "type": input_type, "options": options}
+                    if len(observed) > len(best):
+                        best = observed
+        except SearchExecutionError:
+            raise
+        except Exception:
+            raise SearchFormUnsafe() from None
+        if not best:
+            raise SearchFormUnsafe(
+                "Formulaire de recherche introuvable pour la capture des listes.", code="capture_form_missing"
+            )
+        return best
 
     def inspect_form(self, mode: SearchMode, criteria: tuple[MappedCriterion, ...]) -> SearchFormSnapshot:
         self._require_search_page()

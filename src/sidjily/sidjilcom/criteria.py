@@ -269,6 +269,71 @@ SELECT_OPTION_CATALOGS: dict[str, tuple[str, ...]] = {
     if mapping.component_type is ComponentType.SELECT
 }
 
+_BASE_CONTROL_MAP: dict[str, ControlMapping] = dict(SIDJILCOM_CONTROL_MAP)
+_MAX_CAPTURED_OPTIONS = 400
+
+
+def _clean_option_labels(raw: object) -> tuple[str, ...]:
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    labels = [" ".join(str(item).split())[:160] for item in raw[:_MAX_CAPTURED_OPTIONS]]
+    labels = [label for label in labels if re.search(r"\w", label)]
+    # Un libellé dupliqué rendrait la sélection par libellé ambiguë côté pilote.
+    return tuple(label for label in labels if labels.count(label) == 1)
+
+
+def apply_observed_controls(observed: Mapping[str, object]) -> tuple[str, ...]:
+    """Complète le registre avec les contrôles réellement observés sur le formulaire Sidjilcom.
+
+    Une liste n'est activée que si le DOM réel l'a montrée comme <select> avec des options;
+    un composant non confirmé ne devient texte que si le DOM réel est un input texte.
+    """
+    reset_observed_controls()
+    if not isinstance(observed, Mapping):
+        return ()
+    updated: list[str] = []
+    for criterion, info in observed.items():
+        base = _BASE_CONTROL_MAP.get(criterion) if isinstance(criterion, str) else None
+        if base is None or not isinstance(info, Mapping):
+            continue
+        if base.component_type not in (ComponentType.SELECT, ComponentType.UNCONFIRMED):
+            continue
+        tag = str(info.get("tag", "")).casefold()
+        input_type = str(info.get("type", "")).casefold()
+        if tag == "select":
+            options = _clean_option_labels(info.get("options"))
+            if not options:
+                continue
+            SIDJILCOM_CONTROL_MAP[criterion] = ControlMapping(
+                criterion=base.criterion, label=base.label, modes=base.modes,
+                name_suffix=base.name_suffix, element_id=None, html_type="select",
+                component_type=ComponentType.SELECT, option_count=len(options),
+                options=options, input_semantics_confirmed=True,
+            )
+            SELECT_OPTION_CATALOGS[criterion] = options
+            updated.append(criterion)
+        elif tag == "input" and input_type == "text" and base.component_type is ComponentType.UNCONFIRMED:
+            SIDJILCOM_CONTROL_MAP[criterion] = ControlMapping(
+                criterion=base.criterion, label=base.label, modes=base.modes,
+                name_suffix=base.name_suffix, element_id=None, html_type="text",
+                component_type=ComponentType.TEXT, input_semantics_confirmed=True,
+            )
+            SELECT_OPTION_CATALOGS.pop(criterion, None)
+            updated.append(criterion)
+    return tuple(updated)
+
+
+def reset_observed_controls() -> None:
+    SIDJILCOM_CONTROL_MAP.clear()
+    SIDJILCOM_CONTROL_MAP.update(_BASE_CONTROL_MAP)
+    SELECT_OPTION_CATALOGS.clear()
+    SELECT_OPTION_CATALOGS.update({
+        key: mapping.options
+        for key, mapping in _BASE_CONTROL_MAP.items()
+        if mapping.component_type is ComponentType.SELECT
+    })
+
+
 _E = TypeVar("_E", bound=Enum)
 
 
@@ -544,7 +609,10 @@ def format_criteria_preview(criteria: SearchCriteria) -> str:
     else:
         lines.append("Critères sélectionnés :")
         lines.extend(f"- {item.label} : {item.value}" for item in mapped)
-    if any(item.criterion.startswith("numero_inscription.") for item in mapped):
+    if any(
+        item.criterion.startswith("numero_inscription.") and not item.input_semantics_confirmed
+        for item in mapped
+    ):
         lines.append(NUMERO_INSCRIPTION_SEMANTICS_NOTICE + "; aucun remplissage automatique n'est activé.")
     lines.append("Aucune requête Sidjilcom n'a été envoyée.")
     return "\n".join(lines)
