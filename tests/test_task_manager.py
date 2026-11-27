@@ -218,6 +218,30 @@ class TaskManagerTests(unittest.TestCase):
         # Les deux tentatives restent visibles dans l'historique.
         self.assertEqual(len(self.manager.list_searches()), 2)
 
+    def test_portal_refusal_over_300_results_is_a_known_outcome(self) -> None:
+        search = self.manager.create_controlled_search(
+            "Trop large", {"mode": "PERSONNE_PHYSIQUE", "activite": "442102", "commune_wilaya": "34000"}
+        )
+        self.manager.start_controlled_search(search.id)
+        for step in ("submitting", "submitted", "observing_results"):
+            self.manager.update_controlled_search_step(search.id, step)
+        self.manager.fail_controlled_search(
+            search.id, "Le portail a refusé la recherche : plus de 300 résultats.", portal_refused=True
+        )
+        failed = self.manager.get_search(search.id)
+        self.assertEqual(failed.step, "result_too_large")
+        self.assertIn("plus de 300", failed.last_error)
+        with self.assertRaises(InvalidTransition):
+            self.manager.start_controlled_search(search.id)
+
+    def test_portal_refusal_flag_before_submission_stays_a_pre_submission_failure(self) -> None:
+        search = self.manager.create_controlled_search(
+            "Avant clic", {"mode": "PERSONNE_MORALE", "activite": "442102"}
+        )
+        self.manager.start_controlled_search(search.id)
+        self.manager.fail_controlled_search(search.id, "Champ absent.", portal_refused=True)
+        self.assertEqual(self.manager.get_search(search.id).step, "failed_before_submission")
+
     def test_controlled_submission_failure_is_result_unknown_and_follow_up_is_read_only(self) -> None:
         search = self.manager.create_controlled_search(
             "Test inconnu", {"mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000"}

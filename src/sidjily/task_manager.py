@@ -549,6 +549,7 @@ class TaskManager:
             "draft", "prepared", "reserved", "mode_selection", "form_validation", "filling_criteria",
             "submitting", "submitted", "observing_results", "results_detected",
             "no_results", "succeeded", "completed", "failed", "failed_before_submission", "result_unknown",
+            "result_too_large",
         }
         if step_value not in allowed:
             raise ValueError("Étape de recherche contrôlée inconnue.")
@@ -720,7 +721,9 @@ class TaskManager:
                 search_id=search_id, task_id=task["id"],
             )
 
-    def fail_controlled_search(self, search_id: str, error: str) -> None:
+    def fail_controlled_search(self, search_id: str, error: str, *, portal_refused: bool = False) -> None:
+        """Termine en échec. `portal_refused` : le portail a répondu par un refus explicite
+        (plus de 300 résultats) ; l'issue est connue, ce n'est pas un résultat inconnu."""
         safe_error = error.strip()[:600] or "Erreur de recherche contrôlée."
         now = utc_now()
         with self.database.connection(immediate=True) as connection:
@@ -733,11 +736,13 @@ class TaskManager:
                 raise KeyError(f"Recherche Sidjilcom introuvable : {search_id}")
             if task["status"] != Status.RUNNING:
                 return
-            terminal_step = (
-                "result_unknown"
-                if self._search_has_possible_submission(connection, search_id)
-                else "failed_before_submission"
-            )
+            submitted = self._search_has_possible_submission(connection, search_id)
+            if submitted and portal_refused:
+                terminal_step = "result_too_large"
+            elif submitted:
+                terminal_step = "result_unknown"
+            else:
+                terminal_step = "failed_before_submission"
             message = (
                 "La soumission a pu avoir lieu; le résultat est inconnu. Ne relancez pas cette recherche."
                 if terminal_step == "result_unknown" else safe_error

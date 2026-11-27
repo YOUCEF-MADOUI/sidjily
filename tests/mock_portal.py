@@ -70,6 +70,10 @@ class PortalState:
     date_input_type: str = "date"
     detail_links: bool = True
     session_expired: bool = False
+    # Portail réel : la réponse à « Rechercher » arrive en AJAX après 10 à 20 s.
+    results_delay_ms: int = 0
+    # Portail réel : au-delà de 300 lignes, refus « Résultat de la Recherche Trop Grand ».
+    max_results: int = 300
     last_page_html: str = ""
 
 
@@ -200,6 +204,15 @@ def search_form(state: PortalState, mode: str) -> str:
               '<button type="reset" class="btn">Réinitialiser</button></div></form>')
 
 
+# Bandeau d'aide du portail réel : role="alert" alors qu'il ne signale aucune erreur.
+INTRO_ALERT = (
+    '<div class="alert alert-info" role="alert">Cette fonctionnalité vous permet d’effectuer des recherches '
+    'dans la banque de données nationale des entreprises (Commerçant personne physique et morale) au moyen '
+    'de différents critères, tel que : N° RC, raison sociale, activité, commune ou wilaya d’inscription. '
+    'En cas d’erreur de saisie, utilisez Nouvelle recherche.</div>'
+)
+
+
 def search_page(state: PortalState, mode: str | None, results_html: str = "") -> str:
     # Portail réel : les cartes de mode ne s'affichent que tant qu'aucun formulaire n'est choisi.
     links = "" if mode else (
@@ -208,7 +221,7 @@ def search_page(state: PortalState, mode: str | None, results_html: str = "") ->
     )
     form = search_form(state, mode) if mode else "<p>Choisissez un type de personne.</p>"
     body = (f'<section id="p_p_id{NS}" class="portlet-boundary portlet-boundary{NS}">'
-            f'<h2 class="portlet-title">Recherche Commerçant</h2>{links}{form}{results_html}</section>'
+            f'<h2 class="portlet-title">Recherche Commerçant</h2>{INTRO_ALERT}{links}{form}{results_html}</section>'
             f'<script>{_AUTOCOMPLETE_JS}</script>')
     return _page("Recherche Commerçant - Sidjilcom", body)
 
@@ -230,6 +243,9 @@ def _matches(company: Company, criteria: dict[str, str]) -> bool:
 
 def results_html(state: PortalState, page: int) -> str:
     hits = [company for company in state.companies if _matches(company, state.last_criteria)]
+    if len(hits) > state.max_results:
+        return ('<div class="alert alert-danger" role="alert"><strong>Erreur:</strong>'
+                'Résultat de la Recherche Trop Grand ! Veuillez Affiner Votre Recherche</div>')
     if not hits:
         return '<div class="alert alert-info">Aucun résultat trouvé.</div>'
     pages = (len(hits) + PAGE_SIZE - 1) // PAGE_SIZE
@@ -246,11 +262,13 @@ def results_html(state: PortalState, page: int) -> str:
         href = f"{DEFAULT_ENTERPRISE_SEARCH_ROUTE}?{NS}cur={target}" if enabled else "javascript:;"
         return f'<li class="{"" if enabled else "disabled"}"><a href="{href}">{label}</a></li>'
     pagination = (
-        f'<div class="lfr-pagination"><div class="search-results">Page {page} sur {pages}</div>'
+        f'<div class="lfr-pagination"><span class="lfr-icon-menu-text">Page {page} de {pages}</span>'
         f'<ul class="pagination">{nav("Précédent", page - 1, page > 1)}{nav("Suivant", page + 1, page < pages)}</ul></div>'
         if pages > 1 else ""
     )
-    return (f'<div class="search-total">{len(hits)} résultats</div>'
+    first, last = (page - 1) * PAGE_SIZE + 1, min(page * PAGE_SIZE, len(hits))
+    # Compteur tel qu'affiché par le portail réel (pas de « N résultats »).
+    return (f'<small class="search-results">Affichage des résultats {first} - {last} parmi {len(hits)}.</small>'
             '<table class="table"><thead><tr><th>N° RC</th><th>Raison sociale</th><th>Forme juridique</th>'
             f'<th>Wilaya</th><th>Action</th></tr></thead><tbody>{"".join(rows)}</tbody></table>{pagination}')
 
@@ -285,7 +303,13 @@ class MockPortal:
             form = {key: values[-1] for key, values in parse_qs(request.post_data or "", keep_blank_values=True).items()}
             state.last_criteria = form
             state.submissions.append(form)
-            body = search_page(state, form.get(f"{NS}mode", "morale"), results_html(state, 1))
+            results = results_html(state, 1)
+            if state.results_delay_ms:
+                # Réponse AJAX lente du portail réel : les résultats n'apparaissent qu'après un délai.
+                results = (f'<div id="ajax-results" style="display:none">{results}</div>'
+                           f'<script>setTimeout(() => {{ document.getElementById("ajax-results")'
+                           f'.style.display = "block"; }}, {state.results_delay_ms});</script>')
+            body = search_page(state, form.get(f"{NS}mode", "morale"), results)
         elif path == DEFAULT_ENTERPRISE_SEARCH_ROUTE:
             mode = query.get(f"{NS}mode")
             if f"{NS}cur" in query:

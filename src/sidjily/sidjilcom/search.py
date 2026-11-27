@@ -97,6 +97,17 @@ class SearchResultsObservationError(SearchExecutionError):
         super().__init__("La structure des résultats n'a pas pu être observée sans risque.", code="results_observation_error")
 
 
+class SearchResultTooLarge(SearchExecutionError):
+    """Le portail a refusé d'afficher la liste : plus de 300 résultats."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Le portail a refusé la recherche : plus de 300 résultats (« Résultat de la Recherche Trop Grand »). "
+            "Affinez-la, par exemple avec la période d'inscription (années Du/Au), puis lancez une nouvelle recherche.",
+            code="result_too_large",
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class SearchControl:
     criterion: str
@@ -163,6 +174,7 @@ class SearchObservation:
     row_links: tuple[str, ...] = ()
     result_zone_found: bool = False
     result_zone_tag: str = ""
+    too_many_results: bool = False
 
     @property
     def has_results_page(self) -> bool:
@@ -186,6 +198,7 @@ class SearchObservation:
             "columns": list(self.columns),
             "pagination_visible": self.pagination_visible,
             "no_results": self.no_results,
+            "too_many_results": self.too_many_results,
             "errors": list(self.errors),
             "session_expired": self.session_expired,
             "result_zone_found": self.result_zone_found,
@@ -532,6 +545,8 @@ class SearchExecutor:
             raise SearchResultsObservationError() from None
         if result.session_expired:
             raise SearchSessionExpired()
+        if result.too_many_results:
+            raise SearchResultTooLarge()
         if not result.sanitized_url.startswith("https://") or not result.sanitized_url:
             raise SearchNavigationUnexpected()
         if not result.has_results_page:

@@ -74,6 +74,7 @@ CONTROLLED_STEP_LABELS = {
     "results_detected": "Résultats détectés",
     "no_results": "Aucun résultat",
     "result_unknown": "Résultat inconnu — ne pas relancer",
+    "result_too_large": "Refusée par le portail : plus de 300 résultats — affinez (années)",
     "failed": "Échec avant soumission",
 }
 
@@ -1002,15 +1003,24 @@ class SidjilyApp:
                     self.manager.store_controlled_search_failure_diagnostic(search_id, structural)
                 except Exception:
                     pass
-            self.manager.fail_controlled_search(search_id, error)
+            self.manager.fail_controlled_search(
+                search_id, error, portal_refused=getattr(exc, "code", "") == "result_too_large"
+            )
             search = self.manager.get_search(search_id)
             self.selected_search_id = search_id
             unknown = search.step == "result_unknown"
-            status_line = (
-                "SOUMISSION POSSIBLE — résultat inconnu. Ne relancez pas la recherche. "
-                "Utilisez ensuite « Diagnostiquer le résultat (lecture seule) » si la page est toujours ouverte."
-                if unknown else "Échec avant le clic Rechercher; aucune nouvelle tentative n'a été lancée."
-            )
+            if search.step == "result_too_large":
+                status_line = (
+                    "Le portail a refusé d'afficher plus de 300 résultats. Créez une nouvelle recherche plus "
+                    "précise, par exemple avec la période d'inscription (Du/Au) découpée par années."
+                )
+            elif unknown:
+                status_line = (
+                    "SOUMISSION POSSIBLE — résultat inconnu. Ne relancez pas la recherche. "
+                    "Utilisez ensuite « Diagnostiquer le résultat (lecture seule) » si la page est toujours ouverte."
+                )
+            else:
+                status_line = "Échec avant le clic Rechercher; aucune nouvelle tentative n'a été lancée."
             failure_diagnostic = (
                 search.result_summary.get("controlled_search_failure_diagnostic", {})
                 if search.result_summary else {}

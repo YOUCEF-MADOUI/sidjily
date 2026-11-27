@@ -90,6 +90,11 @@ _RESULTS_DOM_SCRIPT = r"""() => {
     let noResults = false;
     let sessionExpired = false;
     let resultCount = null;
+    let tooLarge = false;
+    // Portail réel : au-delà de 300 lignes, « Erreur:Résultat de la Recherche Trop Grand ! Veuillez Affiner… ».
+    const tooLargePattern = /r[ée]sultat\s+de\s+la\s+recherche\s+trop\s+grand|veuillez\s+affiner\s+votre\s+recherche/i;
+    // Pagination Liferay : « Affichage des résultats 1 - 10 parmi 76. » / « … of 76 ».
+    const totalPattern = /r[ée]sultats?\s+\d[\d\s]*-\s*\d[\d\s]*\s+(?:parmi|sur|of)\s+([\d][\d\s,.]*)/i;
     const detectedErrors = new Set();
     while ((node = walker.nextNode())) {
         const parent = node.parentElement;
@@ -97,6 +102,12 @@ _RESULTS_DOM_SCRIPT = r"""() => {
         const text = String(node.nodeValue || '').replace(/\s+/gu, ' ').trim();
         if (!text || text.length > 180) continue;
         if (noResultsPattern.test(text)) noResults = true;
+        if (tooLargePattern.test(text)) tooLarge = true;
+        const total = text.match(totalPattern);
+        if (total) {
+            const digits = total[1].replace(/[^\d]/g, '');
+            if (digits.length && digits.length <= 9) resultCount = Number(digits);
+        }
         if (expiredPattern.test(text)) sessionExpired = true;
         if (errorPattern.test(text)) detectedErrors.add(text);
         if (resultCount === null && countPattern.test(text)) {
@@ -107,10 +118,16 @@ _RESULTS_DOM_SCRIPT = r"""() => {
             }
         }
     }
+    // Le portail réel affiche un bandeau d'aide « alert-info » (role=alert) au-dessus du formulaire :
+    // une alerte ne compte comme erreur que si elle n'est pas informative et parle d'erreur.
     const alerts = Array.from(document.querySelectorAll('[role="alert"], [aria-live="assertive"]'))
-        .filter(visible).filter(outsideTable).map(element => (element.innerText || element.textContent || '').replace(/\s+/gu, ' ').trim())
+        .filter(visible).filter(outsideTable)
+        .filter(element => !/\balert-(?:info|success|secondary|light)\b/.test(String(element.className || '')))
+        .map(element => (element.innerText || element.textContent || '').replace(/\s+/gu, ' ').trim())
         .filter(Boolean).slice(0, 8);
+    const errorAlerts = alerts.filter(text => errorPattern.test(text));
     if (alerts.some(text => expiredPattern.test(text))) sessionExpired = true;
+    if (alerts.some(text => tooLargePattern.test(text))) tooLarge = true;
     const pagination = Array.from(document.querySelectorAll(
         '[aria-label*="page" i], [aria-label*="pagination" i], a[rel="next"], a[rel="prev"], ' +
         '.lfr-pagination, .pagination, .taglib-page-iterator'
@@ -132,8 +149,9 @@ _RESULTS_DOM_SCRIPT = r"""() => {
         headers: headers.slice(0, 40),
         paginationVisible: pagination,
         noResults,
+        tooLarge,
         resultCount,
-        errors: Array.from(new Set([...alerts, ...detectedErrors])).slice(0, 8),
+        errors: Array.from(new Set([...errorAlerts, ...detectedErrors])).slice(0, 8),
         sessionExpired: sessionExpired || passwordVisible || loginRoute
     };
 }"""
@@ -326,8 +344,11 @@ class PlaywrightSearchDriver:
         autocomplete_tester: AutocompleteTester | None = None,
         *,
         timeout_ms: int = 8_000,
+        results_timeout_ms: int = 90_000,
     ) -> None:
         self._page = page
+        # Le portail réel répond à « Rechercher » par une requête AJAX de 10 à 20 s.
+        self._results_timeout_ms = results_timeout_ms
         self._portal_url = portal_url
         self._select_mode_callback = select_mode
         self._autocomplete_tester = autocomplete_tester or AutocompleteTester(
@@ -1228,6 +1249,31 @@ class PlaywrightSearchDriver:
             raise
         except Exception:
             raise SearchFormUnsafe() from None
+        self.wait_for_results()
+
+    def _results_settled(self) -> bool:
+        raw = self._page.evaluate(_RESULTS_DOM_SCRIPT)
+        if not isinstance(raw, dict):
+            return False
+        return bool(
+            raw.get("tooLarge") or raw.get("noResults") or raw.get("sessionExpired") or raw.get("errors")
+            or (int(raw.get("tableCount", 0) or 0) > 0 and int(raw.get("rowCount", 0) or 0) > 0)
+        )
+
+    def wait_for_results(self) -> None:
+        """Attend (lecture seule) que la réponse AJAX affiche un tableau, un message ou une erreur."""
+        if self._page is None:
+            return
+        waited = 0
+        while waited < self._results_timeout_ms:
+            try:
+                if self._page.is_closed() or self._results_settled():
+                    return
+            except Exception:
+                # Page en cours de remplacement : on réessaie au tour suivant.
+                pass
+            self._page.wait_for_timeout(1_000)
+            waited += 1_000
 
     def observe_results(self) -> SearchObservation:
         try:
@@ -1285,6 +1331,7 @@ class PlaywrightSearchDriver:
                 row_links=row_links if any(row_links) else (),
                 pagination_visible=bool(raw.get("paginationVisible", False)),
                 no_results=bool(raw.get("noResults", False)),
+                too_many_results=bool(raw.get("tooLarge", False)),
                 errors=errors,
                 session_expired=bool(raw.get("sessionExpired", False)),
                 result_zone_found=bool(raw.get("resultZoneFound", False)),
@@ -1329,6 +1376,7 @@ class PlaywrightSearchDriver:
         try:
             if self._page is None or self._page.is_closed() or not is_portal_host(self._page.url, self._portal_url):
                 return False
+            before = self._first_row_signature()
             result = self._page.evaluate(_NEXT_PAGE_SCRIPT)
             if not isinstance(result, dict) or not result.get("clicked"):
                 return False
@@ -1337,9 +1385,28 @@ class PlaywrightSearchDriver:
             except Exception:
                 pass
             self._page.wait_for_timeout(1_000)
+            # Le portail réel recharge la page en 10 à 20 s : attendre un tableau différent.
+            waited = 0
+            while waited < self._results_timeout_ms:
+                try:
+                    current = self._first_row_signature()
+                    if current and current != before:
+                        break
+                except Exception:
+                    pass
+                self._page.wait_for_timeout(1_000)
+                waited += 1_000
             return True
         except Exception:
             return False
+
+    def _first_row_signature(self) -> str:
+        try:
+            data = self._page.evaluate(_ROW_DATA_DOM_SCRIPT)
+        except Exception:
+            return ""
+        rows = data.get("rows", []) if isinstance(data, dict) else []
+        return "|".join(str(cell) for cell in rows[0]) if rows and isinstance(rows[0], list) else ""
 
     def _require_control(self, control: SearchControl, tag_name: str, input_type: str) -> Any:
         if (

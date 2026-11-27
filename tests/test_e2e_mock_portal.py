@@ -96,6 +96,27 @@ class MockPortalEndToEndTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertIn(key, self.activated)
 
+    def test_slow_ajax_results_are_awaited(self) -> None:
+        self.portal.state.results_delay_ms = 3_000
+        try:
+            observation = self.search(BASE)
+        finally:
+            self.portal.state.results_delay_ms = 0
+        self.assertEqual(observation.result_count, 23)
+        self.assertEqual(len(observation.rows), 10)
+
+    def test_more_than_300_results_is_reported_as_portal_refusal(self) -> None:
+        submissions = len(self.portal.state.submissions)
+        self.portal.state.max_results = 5
+        try:
+            with self.assertRaises(SearchExecutionError) as caught:
+                self.search(BASE)
+        finally:
+            self.portal.state.max_results = 300
+        self.assertEqual(caught.exception.code, "result_too_large")
+        self.assertIn("période d'inscription", str(caught.exception))
+        self.assertEqual(len(self.portal.state.submissions), submissions + 1)
+
     def test_select_criterion_is_submitted_by_label(self) -> None:
         observation = self.search({**BASE, "forme_juridique": "EURL"})
         self.assertEqual(observation.result_count, 12)
