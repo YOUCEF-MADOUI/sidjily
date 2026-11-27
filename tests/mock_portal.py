@@ -77,6 +77,10 @@ class PortalState:
     detail_style: str = "action"
     session_expired: bool = False
     autocomplete_init_delay_ms: int = 0
+    # Portail réel : la navigation lancée par le clic sur une carte de mode démarre après coup.
+    mode_navigation_delay_ms: int = 0
+    # Portail réel : après chargement, le JavaScript reconstruit encore la zone des cartes de mode.
+    cards_rerender_count: int = 0
     # Portail réel : la réponse à « Rechercher » arrive en AJAX après 10 à 45 s.
     results_delay_ms: int = 0
     # Portail réel : au-delà de 300 lignes, refus « Résultat de la Recherche Trop Grand ».
@@ -223,6 +227,39 @@ INTRO_ALERT = (
 )
 
 
+def _rerender_cards_js(state: PortalState) -> str:
+    """Reconstruit plusieurs fois la zone des cartes juste après le chargement (nouveau conteneur)."""
+    if not state.cards_rerender_count:
+        return ""
+    return f"""
+(() => {{
+  let left = {state.cards_rerender_count};
+  const rebuild = () => {{
+    const nav = document.querySelector('.nav-modes');
+    if (!nav || left-- <= 0) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'nav-modes-wrap';
+    nav.parentNode.insertBefore(wrap, nav);
+    wrap.appendChild(nav.cloneNode(true));
+    nav.remove();
+    setTimeout(rebuild, 40);
+  }};
+  setTimeout(rebuild, 40);
+}})();
+"""
+
+
+def _delayed_mode_js(state: PortalState) -> str:
+    if not state.mode_navigation_delay_ms:
+        return ""
+    return f"""
+document.querySelectorAll('.nav-modes a').forEach(link => link.addEventListener('click', event => {{
+  event.preventDefault();
+  setTimeout(() => {{ location.href = link.href; }}, {state.mode_navigation_delay_ms});
+}}));
+"""
+
+
 def _ajax_submit_js(state: PortalState) -> str:
     """Comme le portail réel : « Rechercher » envoie un POST en AJAX puis remplace la page."""
     if not state.results_delay_ms:
@@ -248,7 +285,7 @@ def search_page(state: PortalState, mode: str | None, results_html: str = "") ->
     body = (f'<section id="p_p_id{NS}" class="portlet-boundary portlet-boundary{NS}">'
             f'<h2 class="portlet-title">Recherche Commerçant</h2>{INTRO_ALERT}{links}{form}{results_html}</section>'
             f'<script>{_AUTOCOMPLETE_JS.replace("AUTOCOMPLETE_INIT_DELAY_MS", str(state.autocomplete_init_delay_ms))}'
-            f'{_DETAIL_ACTION_JS}{_ajax_submit_js(state)}</script>')
+            f'{_DETAIL_ACTION_JS}{_ajax_submit_js(state)}{_delayed_mode_js(state)}{_rerender_cards_js(state)}</script>')
     return _page("Recherche Commerçant - Sidjilcom", body)
 
 

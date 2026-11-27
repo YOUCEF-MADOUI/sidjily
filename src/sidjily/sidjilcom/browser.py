@@ -291,6 +291,26 @@ SEARCH_MODE_CANDIDATES_SCRIPT = r"""({labels, portletMarker}) => {
 }"""
 
 
+# Attend un DOM calme (aucune mutation pendant 500 ms, 8 s au plus), sans exiger de formulaire.
+DOM_QUIET_SCRIPT = r"""() => new Promise(resolve => {
+    let timer = null;
+    const done = () => { observer.disconnect(); clearTimeout(timer); clearTimeout(limit); resolve(true); };
+    const observer = new MutationObserver(() => { clearTimeout(timer); timer = setTimeout(done, 500); });
+    observer.observe(document.documentElement, {childList: true, subtree: true, attributes: true});
+    timer = setTimeout(done, 500);
+    const limit = setTimeout(done, 8000);
+})"""
+
+# Après le clic sur une carte de mode : le formulaire du portlet est affiché et les cartes ont disparu.
+MODE_FORM_READY_SCRIPT = r"""(marker) => {
+    const shown = element => element.getClientRects().length > 0;
+    const cards = Array.from(document.querySelectorAll('a')).filter(link =>
+        /^\s*personnes\s+(?:morales|physiques)\s*$/i.test(link.textContent || '') && shown(link));
+    const forms = Array.from(document.querySelectorAll('form')).filter(form =>
+        String(form.id || '').includes(marker) && shown(form));
+    return document.readyState !== 'loading' && cards.length === 0 && forms.length > 0;
+}"""
+
 SEARCH_MODE_STABILITY_SCRIPT = r"""async () => {
     const marker = 'dz_cnrc_sidjilcom_recherchedetaillee_portlet_RechercheDetailleePortlet';
     const portletSelector = `[id*="${marker}"], [class*="${marker}"]`;
@@ -1196,6 +1216,39 @@ class PlaywrightBrowser:
         except Exception:
             raise SearchModeAnalysisError("Le lien du mode a été identifié mais son clic n'a pas abouti.") from None
 
+    def _wait_for_mode_form(self, config: SessionConfig) -> None:
+        """Le clic sur une carte lance une navigation qui démarre après coup : tant qu'elle n'a pas
+        remplacé la page, l'ancienne page (cartes, sans formulaire) est encore là et tout contrôle
+        porterait sur elle. On attend donc le formulaire du mode, en ignorant les erreurs de navigation."""
+        waited = 0
+        while waited < config.navigation_timeout_ms:
+            try:
+                if self._page.evaluate(MODE_FORM_READY_SCRIPT, SEARCH_MODE_PORTLET_MARKER):
+                    return
+            except Exception:
+                pass
+            self._page.wait_for_timeout(250)
+            waited += 250
+        raise SearchModeAnalysisError("Le formulaire du mode n'est pas apparu après le clic sur la carte.")
+
+    def _wait_for_page_settled(self, config: SessionConfig) -> None:
+        """Après un rechargement, le portail réel continue de construire la page (readyState
+        « interactive ») : attendre l'événement load puis un DOM calme avant de chercher les cartes."""
+        try:
+            self._page.wait_for_load_state("load", timeout=config.navigation_timeout_ms)
+        except Exception:
+            pass
+        try:
+            self._page.evaluate(DOM_QUIET_SCRIPT)
+        except Exception:
+            pass
+
+    def _live_frame(self, frame: Any) -> Any:
+        try:
+            return self._page.main_frame if frame.is_detached() else frame
+        except Exception:
+            return self._page.main_frame
+
     @staticmethod
     def _wait_for_search_portlet(frame: Any) -> None:
         try:
@@ -1228,7 +1281,8 @@ class PlaywrightBrowser:
         except SearchModeAnalysisError as exc:
             raise SearchModeAnalysisError(f"{exc}\n\n{diagnostic_report}") from None
         try:
-            self._wait_for_search_portlet(candidate.frame)
+            self._wait_for_mode_form(config)
+            self._wait_for_search_portlet(self._live_frame(candidate.frame))
             snapshot = self.diagnostics(config, portlet_only=True)
         except SearchModeAnalysisError as exc:
             raise SearchModeAnalysisError(f"{exc}\n\n{diagnostic_report}") from None
@@ -1338,34 +1392,28 @@ class PlaywrightBrowser:
                 wait_until="domcontentloaded",
                 timeout=config.navigation_timeout_ms,
             )
+            self._wait_for_page_settled(config)
             candidates = self._discover_search_mode_candidates(config)
-        candidate, _reason = self._choose_search_mode_candidate(candidates.get(label, []))
-        if candidate is None:
-            raise SearchExecutionError(
-                "Le mode demandé est absent ou ambigu; aucune recherche n'a été lancée.",
-                code="mode_unavailable",
-            )
         try:
-            self._click_mode_candidate(candidate, config)
-            # Le clic sur la carte charge une nouvelle page : la vérifier pendant la navigation échoue.
-            try:
-                self._page.wait_for_load_state("domcontentloaded", timeout=config.navigation_timeout_ms)
-            except Exception:
-                pass
-            for attempt in range(3):
-                frame = candidate.frame
+            for attempt in range(2):
+                candidate, _reason = self._choose_search_mode_candidate(candidates.get(label, []))
+                if candidate is None:
+                    raise SearchExecutionError(
+                        "Le mode demandé est absent ou ambigu; aucune recherche n'a été lancée.",
+                        code="mode_unavailable",
+                    )
                 try:
-                    if frame.is_detached():
-                        frame = self._page.main_frame
-                except Exception:
-                    frame = self._page.main_frame
-                try:
-                    self._wait_for_search_portlet(frame)
+                    self._click_mode_candidate(candidate, config)
                     break
                 except SearchModeAnalysisError:
-                    if attempt == 2:
+                    # La carte a été re-rendue entre sa détection et la vérification d'avant clic
+                    # (page encore en construction) : aucun clic n'a eu lieu, on la cherche à nouveau.
+                    if attempt == 1:
                         raise
-                    self._page.wait_for_timeout(1_500)
+                    self._wait_for_page_settled(config)
+                    candidates = self._discover_search_mode_candidates(config)
+            self._wait_for_mode_form(config)
+            self._wait_for_search_portlet(self._live_frame(candidate.frame))
             if self._page is None or self._page.is_closed():
                 raise SearchNavigationUnexpected()
             if not is_portal_host(self._page.url, config.url):

@@ -195,6 +195,27 @@ class MockPortalEndToEndTests(unittest.TestCase):
         self.assertEqual(windows[0][1], date.today().isoformat())
         self.assertTrue(all(lower and upper and lower <= upper for lower, upper in windows))
 
+    def test_mode_card_navigation_that_starts_late_is_awaited(self) -> None:
+        # Portail réel : juste après le clic, l'ancienne page (cartes, sans formulaire) est encore là.
+        self.portal.state.mode_navigation_delay_ms = 1_500
+        try:
+            first = self.search(BASE)
+            second = self.search({**BASE, "raison_sociale": "authentique"})
+        finally:
+            self.portal.state.mode_navigation_delay_ms = 0
+        self.assertEqual(first.result_count, 23)
+        self.assertEqual(second.result_count, 1)
+
+    def test_mode_cards_rebuilt_after_reload_are_found_again_before_the_click(self) -> None:
+        # Portail réel : « Le candidat a changé » — les cartes sont reconstruites juste après le
+        # rechargement de la page, entre leur détection et la vérification d'avant clic.
+        self.portal.state.cards_rerender_count = 12
+        try:
+            for _ in range(3):
+                self.assertEqual(self.search(BASE).result_count, 23)
+        finally:
+            self.portal.state.cards_rerender_count = 0
+
     def test_select_criterion_is_submitted_by_label(self) -> None:
         observation = self.search({**BASE, "forme_juridique": "EURL"})
         self.assertEqual(observation.result_count, 12)
