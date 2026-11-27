@@ -45,7 +45,7 @@ CONFIRMED_AUTOCOMPLETE_FIELDS = frozenset(
     key
     for key, mapping in SIDJILCOM_CONTROL_MAP.items()
     if mapping.component_type is ComponentType.AUTOCOMPLETE and mapping.name_suffix in {
-        "_activi", "_wilcom", "_nation",
+        "_activite", "_wilcom", "_nation",
     }
 )
 

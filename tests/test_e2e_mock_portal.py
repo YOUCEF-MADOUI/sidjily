@@ -83,10 +83,23 @@ class MockPortalEndToEndTests(unittest.TestCase):
         again = self.search({**BASE, "raison_sociale": "authentique"})
         self.assertEqual(again.result_count, 1)
 
+    def test_search_reopens_mode_cards_hidden_by_a_displayed_form(self) -> None:
+        # Portail réel : une fois un formulaire affiché, les cartes de mode disparaissent.
+        self.session.capture_search_controls().result(timeout=90)
+        page_html = self.portal.state.last_page_html
+        self.assertNotIn("PERSONNES MORALES", page_html)
+        observation = self.search(BASE)
+        self.assertEqual(observation.result_count, 23)
+
+    def test_real_suffixes_activate_portal_lists(self) -> None:
+        for key in ("morale.forme_juridique", "morale.qualite", "secteur_activite"):
+            with self.subTest(key=key):
+                self.assertIn(key, self.activated)
+
     def test_select_criterion_is_submitted_by_label(self) -> None:
         observation = self.search({**BASE, "forme_juridique": "EURL"})
         self.assertEqual(observation.result_count, 12)
-        self.assertEqual(self.portal.state.last_criteria[f"{NS}forme_"], "2")
+        self.assertEqual(self.portal.state.last_criteria[f"{NS}forme_juridi"], "2")
 
     def test_no_results_page_is_recognised(self) -> None:
         observation = self.search({"mode": "PERSONNE_MORALE", "raison_sociale": "introuvable"})

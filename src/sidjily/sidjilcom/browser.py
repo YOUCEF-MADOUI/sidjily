@@ -1323,6 +1323,15 @@ class PlaywrightBrowser:
             else SEARCH_MODE_LABELS[1]
         )
         candidates = self._discover_search_mode_candidates(config)
+        if not any(candidates.get(name) for name in SEARCH_MODE_LABELS):
+            # Sur le portail réel, les cartes « Personnes physiques / morales » disparaissent dès
+            # qu'un formulaire est affiché : on rouvre la route (GET, sans critère) pour les retrouver.
+            self._page.goto(
+                urljoin(config.url, DEFAULT_ENTERPRISE_SEARCH_ROUTE),
+                wait_until="domcontentloaded",
+                timeout=config.navigation_timeout_ms,
+            )
+            candidates = self._discover_search_mode_candidates(config)
         candidate, _reason = self._choose_search_mode_candidate(candidates.get(label, []))
         if candidate is None:
             raise SearchExecutionError(

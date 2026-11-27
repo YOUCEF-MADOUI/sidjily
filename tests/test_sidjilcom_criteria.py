@@ -180,16 +180,17 @@ class SearchCriteriaModelTests(unittest.TestCase):
         self.assertEqual(REPORTED_UNCLASSIFIED_CONTROL_COUNTS[SearchMode.PERSONNE_PHYSIQUE], 2)
         self.assertEqual(REPORTED_UNCLASSIFIED_CONTROL_COUNTS[SearchMode.PERSONNE_MORALE], 2)
         for key, suffix in (
-            ("commune_wilaya", "_wilcom"), ("activite", "_activi"),
-            ("secteur_activite", "_secteu"), ("date_inscription_du", "_deb_im"),
-            ("date_inscription_au", "_fin_im"), ("conformite_rc", "_CRCE"),
-            ("etat_commercant", "_etat_c"), ("physique.nom", "_nom"),
-            ("physique.prenom", "_prenom"), ("physique.nom_commercial", "_nom_co"),
-            ("physique.date_naissance", "_d_nais"), ("physique.presume", "_presum"),
-            ("physique.nationalite", "_nation"), ("morale.raison_sociale", "_raison"),
-            ("morale.forme_juridique", "_forme_"), ("morale.nom_prenom_dirigeant", "_nom_pr"),
-            ("morale.date_naissance_dirigeant", "_d_nais"), ("morale.presume", "_presum"),
-            ("morale.nationalite", "_nation"), ("morale.qualite", "_qualit"),
+            # Suffixes complets relevés sur le portail réel (les suffixes tronqués ne correspondaient à rien).
+            ("commune_wilaya", "_wilcom"), ("activite", "_activite"),
+            ("secteur_activite", "_secteur"), ("date_inscription_du", "_deb_immat"),
+            ("date_inscription_au", "_fin_immat"), ("conformite_rc", "_CRCE"),
+            ("etat_commercant", "_etat_commercant"), ("physique.nom", "_nom"),
+            ("physique.prenom", "_prenom"), ("physique.nom_commercial", "_nom_com"),
+            ("physique.date_naissance", "_d_naiss"), ("physique.presume", "_presume"),
+            ("physique.nationalite", "_nation"), ("morale.raison_sociale", "_raison_social"),
+            ("morale.forme_juridique", "_forme_juridi"), ("morale.nom_prenom_dirigeant", "_nom_prenom_assoc"),
+            ("morale.date_naissance_dirigeant", "_d_naiss"), ("morale.presume", "_presume"),
+            ("morale.nationalite", "_nation"), ("morale.qualite", "_qualite_associe"),
         ):
             with self.subTest(key=key):
                 self.assertEqual(SIDJILCOM_CONTROL_MAP[key].name_suffix, suffix)

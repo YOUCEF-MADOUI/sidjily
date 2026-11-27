@@ -45,7 +45,7 @@ class FakeAutocompleteDriver:
         self.info = AutocompleteControlInfo(
             field_id="activite",
             label=AUTOCOMPLETE_FIELD_LABELS["activite"],
-            suffix="_activi",
+            suffix="_activite",
             tag_name="input",
             element_id="generated-control-id",
             class_names=("yui3-aclist-input",),
@@ -163,7 +163,7 @@ class SimulatedAutocompleteTests(unittest.TestCase):
         result = tester.prepare("activite", "activite de test", timeout_ms=700)
 
         self.assertEqual(driver.last_field, "activite")
-        self.assertEqual(driver.last_suffix, "_activi")
+        self.assertEqual(driver.last_suffix, "_activite")
         self.assertEqual(driver.typed, ["activite de test"])
         self.assertGreaterEqual(driver.waited, 100)
         self.assertEqual(result.status, AutocompleteTestStatus.SUGGESTIONS)

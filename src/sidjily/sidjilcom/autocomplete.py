@@ -22,7 +22,7 @@ AUTOCOMPLETE_FIELD_CRITERIA: dict[str, tuple[str, ...]] = {
     "nationalite": ("physique.nationalite", "morale.nationalite"),
 }
 AUTOCOMPLETE_FIELD_LABELS: dict[str, str] = {
-    "activite": "Activité (activi)",
+    "activite": "Activité (activite)",
     "commune_wilaya": "Commune/Wilaya d'inscription (wilcom)",
     "nationalite": "Nationalité (nation)",
 }

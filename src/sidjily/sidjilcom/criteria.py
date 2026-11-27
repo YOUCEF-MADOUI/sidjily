@@ -152,7 +152,7 @@ def _control(
     )
 
 
-# Source unique des suffixes DOM; les préfixes générés complets ne sont pas disponibles.
+# Source unique des suffixes DOM, relevés sur le portail réel (novembre 2026); comparaison « se termine par ».
 SIDJILCOM_CONTROL_MAP: dict[str, ControlMapping] = {
     **{
         f"numero_inscription.nrc{index}": _control(
@@ -171,20 +171,20 @@ SIDJILCOM_CONTROL_MAP: dict[str, ControlMapping] = {
         css_class="yui3-aclist-input", aria_autocomplete="list",
     ),
     "secteur_activite": _control(
-        "secteur_activite", "Secteur d'activité", "_secteu",
+        "secteur_activite", "Secteur d'activité", "_secteur",
         html_type="select", component_type=ComponentType.SELECT,
     ),
     "activite": _control(
-        "activite", "Activité", "_activi", html_type="text",
+        "activite", "Activité", "_activite", html_type="text",
         component_type=ComponentType.AUTOCOMPLETE,
         css_class="yui3-aclist-input", aria_autocomplete="list",
     ),
     "date_inscription_du": _control(
-        "date_inscription_du", "Date d'inscription — Du", "_deb_im",
+        "date_inscription_du", "Date d'inscription — Du", "_deb_immat",
         component_type=ComponentType.DATE,
     ),
     "date_inscription_au": _control(
-        "date_inscription_au", "Date d'inscription — Au", "_fin_im",
+        "date_inscription_au", "Date d'inscription — Au", "_fin_immat",
         component_type=ComponentType.DATE,
     ),
     "conformite_rc": _control(
@@ -192,7 +192,7 @@ SIDJILCOM_CONTROL_MAP: dict[str, ControlMapping] = {
         component_type=ComponentType.SELECT,
     ),
     "etat_commercant": _control(
-        "etat_commercant", "État commerçant", "_etat_c", html_type="select",
+        "etat_commercant", "État commerçant", "_etat_commercant", html_type="select",
         component_type=ComponentType.SELECT,
     ),
     "physique.nom": _control(
@@ -204,15 +204,15 @@ SIDJILCOM_CONTROL_MAP: dict[str, ControlMapping] = {
         html_type="text", component_type=ComponentType.TEXT,
     ),
     "physique.nom_commercial": _control(
-        "physique.nom_commercial", "Nom commercial", "_nom_co", (SearchMode.PERSONNE_PHYSIQUE,),
+        "physique.nom_commercial", "Nom commercial", "_nom_com", (SearchMode.PERSONNE_PHYSIQUE,),
         html_type="text", component_type=ComponentType.TEXT,
     ),
     "physique.date_naissance": _control(
-        "physique.date_naissance", "Date de naissance", "_d_nais", (SearchMode.PERSONNE_PHYSIQUE,),
+        "physique.date_naissance", "Date de naissance", "_d_naiss", (SearchMode.PERSONNE_PHYSIQUE,),
         component_type=ComponentType.DATE,
     ),
     "physique.presume": _control(
-        "physique.presume", "Présumé", "_presum", (SearchMode.PERSONNE_PHYSIQUE,),
+        "physique.presume", "Présumé", "_presume", (SearchMode.PERSONNE_PHYSIQUE,),
         component_type=ComponentType.UNCONFIRMED, input_semantics_confirmed=False,
     ),
     "physique.nationalite": _control(
@@ -221,23 +221,23 @@ SIDJILCOM_CONTROL_MAP: dict[str, ControlMapping] = {
         css_class="yui3-aclist-input", aria_autocomplete="list",
     ),
     "morale.raison_sociale": _control(
-        "morale.raison_sociale", "Raison Sociale / Nom commercial", "_raison",
+        "morale.raison_sociale", "Raison Sociale / Nom commercial", "_raison_social",
         (SearchMode.PERSONNE_MORALE,), html_type="text", component_type=ComponentType.TEXT,
     ),
     "morale.forme_juridique": _control(
-        "morale.forme_juridique", "Forme Juridique", "_forme_",
+        "morale.forme_juridique", "Forme Juridique", "_forme_juridi",
         (SearchMode.PERSONNE_MORALE,), html_type="select", component_type=ComponentType.SELECT,
     ),
     "morale.nom_prenom_dirigeant": _control(
-        "morale.nom_prenom_dirigeant", "Nom / Prénom du dirigeant", "_nom_pr",
+        "morale.nom_prenom_dirigeant", "Nom / Prénom du dirigeant", "_nom_prenom_assoc",
         (SearchMode.PERSONNE_MORALE,), html_type="text", component_type=ComponentType.TEXT,
     ),
     "morale.date_naissance_dirigeant": _control(
-        "morale.date_naissance_dirigeant", "Date de naissance du dirigeant", "_d_nais",
+        "morale.date_naissance_dirigeant", "Date de naissance du dirigeant", "_d_naiss",
         (SearchMode.PERSONNE_MORALE,), component_type=ComponentType.DATE,
     ),
     "morale.presume": _control(
-        "morale.presume", "Présumé", "_presum", (SearchMode.PERSONNE_MORALE,),
+        "morale.presume", "Présumé", "_presume", (SearchMode.PERSONNE_MORALE,),
         component_type=ComponentType.UNCONFIRMED, input_semantics_confirmed=False,
     ),
     "morale.nationalite": _control(
@@ -246,7 +246,7 @@ SIDJILCOM_CONTROL_MAP: dict[str, ControlMapping] = {
         css_class="yui3-aclist-input", aria_autocomplete="list",
     ),
     "morale.qualite": _control(
-        "morale.qualite", "Qualité", "_qualit", (SearchMode.PERSONNE_MORALE,),
+        "morale.qualite", "Qualité", "_qualite_associe", (SearchMode.PERSONNE_MORALE,),
         html_type="select", component_type=ComponentType.SELECT,
     ),
 }

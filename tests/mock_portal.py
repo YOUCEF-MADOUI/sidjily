@@ -70,6 +70,7 @@ class PortalState:
     date_input_type: str = "date"
     detail_links: bool = True
     session_expired: bool = False
+    last_page_html: str = ""
 
 
 _AUTOCOMPLETE_JS = """
@@ -131,11 +132,20 @@ def _autocomplete(label: str, suffix: str, source: list[str]) -> str:
 
 
 def _select(label: str, suffix: str, options: list[str], placeholder_value: str = "") -> str:
-    items = f'<option value="{placeholder_value}">-- Tous --</option>' + "".join(
+    items = f'<option value="{placeholder_value}">--Selectionnez--</option>' + "".join(
         f'<option value="{index + 1}">{html.escape(text)}</option>' for index, text in enumerate(options)
     )
     return (f'<div class="row"><label for="{NS}{suffix}">{label}</label>'
             f'<select id="{NS}{suffix}" name="{NS}{suffix}">{items}</select></div>')
+
+
+def _radio(label: str, suffix: str, options: list[str]) -> str:
+    items = "".join(
+        f'<label><input type="radio" id="{NS}{suffix}" name="{NS}{suffix}" value="{1 - index}">'
+        f'{html.escape(text)}</label>'
+        for index, text in enumerate(options)
+    )
+    return f'<div class="row"><span>{label}</span>{items}</div>'
 
 
 def _date(label: str, suffix: str, input_type: str) -> str:
@@ -153,32 +163,33 @@ def search_form(state: PortalState, mode: str) -> str:
         _select("nrc5", "nrc5", ["19", "20", "21"]),
         "</fieldset>",
         _autocomplete("Commune/Wilaya d'inscription", "wilcom", WILAYAS),
-        _select("Secteur d'activité", "secteu", SECTEURS, state.secteur_placeholder_value),
-        _autocomplete("Activité", "activi", ACTIVITES),
-        _date("Date d'inscription du", "deb_im", state.date_input_type),
-        _date("au", "fin_im", state.date_input_type),
-        _select("Conformité RC", "CRCE", ["Conforme", "Non conforme"]),
-        _select("État commerçant", "etat_c", ["Actif", "Radié"]),
+        _select("Secteur d'activité", "secteur", SECTEURS, state.secteur_placeholder_value),
+        _autocomplete("Activité", "activite", ACTIVITES),
+        _date("Date d'inscription du", "deb_immat", state.date_input_type),
+        _date("au", "fin_immat", state.date_input_type),
+        # Portail réel : boutons radio (deux <input> de même id/nom), pas des listes.
+        _radio("Conformité RC", "CRCE", ["Oui", "Non"]),
+        _radio("État commerçant", "etat_commercant", ["Actif", "Radié"]),
     ]
     if mode == "morale":
         specific = [
-            _text("", "Raison Sociale / Nom commercial", "raison"),
-            _select("Forme Juridique", "forme_", FORMES),
-            _text("", "Nom / Prénom du dirigeant", "nom_pr"),
-            _date("Date de naissance", "d_nais", state.date_input_type),
-            f'<div class="row"><label for="{NS}presum">Présumé</label>'
-            f'<input type="checkbox" id="{NS}presum" name="{NS}presum"></div>',
+            _text("", "Raison Sociale / Nom commercial", "raison_social"),
+            _select("Forme Juridique", "forme_juridi", FORMES),
+            _text("", "Nom / Prénom du dirigeant", "nom_prenom_assoc"),
+            _date("Date de naissance", "d_naiss", state.date_input_type),
+            f'<div class="row"><label for="{NS}presume">Présumé</label>'
+            f'<input type="checkbox" id="{NS}presume" name="{NS}presume"></div>',
             _autocomplete("Nationalité", "nation", NATIONALITES),
-            _select("Qualité", "qualit", ["Gérant", "Associé"]),
+            _select("Qualité", "qualite_associe", ["Gérant", "Associé"]),
         ]
     else:
         specific = [
             _text("", "Nom", "nom"),
             _text("", "Prénom", "prenom"),
-            _text("", "Nom commercial", "nom_co"),
-            _date("Date de naissance", "d_nais", state.date_input_type),
-            f'<div class="row"><label for="{NS}presum">Présumé</label>'
-            f'<input type="checkbox" id="{NS}presum" name="{NS}presum"></div>',
+            _text("", "Nom commercial", "nom_com"),
+            _date("Date de naissance", "d_naiss", state.date_input_type),
+            f'<div class="row"><label for="{NS}presume">Présumé</label>'
+            f'<input type="checkbox" id="{NS}presume" name="{NS}presume"></div>',
             _autocomplete("Nationalité", "nation", NATIONALITES),
         ]
     action = f"{DEFAULT_ENTERPRISE_SEARCH_ROUTE}?p_p_id={SEARCH_MODE_PORTLET_MARKER}&p_p_lifecycle=1&p_auth=ABCDEF"
@@ -190,7 +201,8 @@ def search_form(state: PortalState, mode: str) -> str:
 
 
 def search_page(state: PortalState, mode: str | None, results_html: str = "") -> str:
-    links = (
+    # Portail réel : les cartes de mode ne s'affichent que tant qu'aucun formulaire n'est choisi.
+    links = "" if mode else (
         f'<div class="nav-modes"><a href="{DEFAULT_ENTERPRISE_SEARCH_ROUTE}?{NS}mode=physique">PERSONNES PHYSIQUES</a> '
         f'<a href="{DEFAULT_ENTERPRISE_SEARCH_ROUTE}?{NS}mode=morale">PERSONNES MORALES</a></div>'
     )
@@ -204,13 +216,13 @@ def search_page(state: PortalState, mode: str | None, results_html: str = "") ->
 def _matches(company: Company, criteria: dict[str, str]) -> bool:
     def value(suffix: str) -> str:
         return criteria.get(f"{NS}{suffix}", "").strip()
-    if value("raison") and value("raison").upper() not in company.name:
+    if value("raison_social") and value("raison_social").upper() not in company.name:
         return False
     if value("wilcom") and value("wilcom") != company.wilaya:
         return False
-    if value("activi") and value("activi") != company.activite:
+    if value("activite") and value("activite") != company.activite:
         return False
-    forme = value("forme_")
+    forme = value("forme_juridi")
     if forme and forme.isdigit() and FORMES[int(forme) - 1] != company.forme:
         return False
     return True
@@ -290,6 +302,7 @@ class MockPortal:
         else:
             route.fulfill(status=404, body="introuvable")
             return
+        state.last_page_html = body
         route.fulfill(status=200, content_type="text/html; charset=utf-8", body=body)
 
 
