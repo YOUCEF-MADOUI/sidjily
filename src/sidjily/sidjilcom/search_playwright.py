@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 from typing import Any, Callable
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from sidjily.sidjilcom.autocomplete import (
     AutocompleteObservation,
@@ -154,12 +154,19 @@ _ROW_DATA_DOM_SCRIPT = r"""() => {
     if (!firstTable) return {rows: [], headers: []};
     const headers = Array.from(firstTable.querySelectorAll('thead th, tr th'))
         .filter(visible).map(cell => (cell.innerText || cell.textContent || '').replace(/\s+/gu, ' ').trim()).filter(Boolean);
-    const bodyRows = Array.from(firstTable.querySelectorAll('tbody tr')).filter(visible);
-    const rows = bodyRows.slice(0, 500).map(tr => {
+    const bodyRows = Array.from(firstTable.querySelectorAll('tbody tr')).filter(visible).slice(0, 500);
+    const rows = bodyRows.map(tr => {
         const cells = Array.from(tr.querySelectorAll('td'));
         return cells.map(td => (td.innerText || td.textContent || '').replace(/\s+/gu, ' ').trim());
     });
-    return {headers, rows};
+    const links = bodyRows.map(tr => {
+        const link = Array.from(tr.querySelectorAll('a[href]')).find(a => {
+            const raw = (a.getAttribute('href') || '').trim();
+            return raw && !raw.startsWith('#') && !/^javascript:/i.test(raw);
+        });
+        return link ? link.href : '';
+    });
+    return {headers, rows, links};
 }"""
 
 _NEXT_PAGE_SCRIPT = r"""() => {
@@ -212,6 +219,93 @@ _SESSION_EXPIRY_CHECK_SCRIPT = r"""() => {
     }
     return false;
 }"""
+
+
+_DETAIL_DOM_SCRIPT = r"""() => {
+    const visible = element => {
+        if (!element || !element.isConnected) return false;
+        let current = element;
+        while (current && current.nodeType === Node.ELEMENT_NODE) {
+            const style = window.getComputedStyle(current);
+            if (style.display === 'none' || style.visibility === 'hidden' ||
+                current.hasAttribute('hidden') || current.getAttribute('aria-hidden') === 'true') return false;
+            current = current.parentElement;
+        }
+        return !!element.getClientRects().length;
+    };
+    const clean = text => String(text || '').replace(/\s+/gu, ' ').trim();
+    const fields = [];
+    const seen = new Set();
+    const push = (rawLabel, rawValue) => {
+        const label = clean(rawLabel).replace(/\s*:\s*$/u, '');
+        const value = clean(rawValue).replace(/^:\s*/u, '');
+        if (!label || !value || label.length > 120 || value.length > 1000 || label === value) return;
+        const key = label + '\u0000' + value;
+        if (seen.has(key)) return;
+        seen.add(key);
+        fields.push([label, value]);
+    };
+    const isFormControlLabel = element => !!(element.control ||
+        element.querySelector('input, select, textarea') ||
+        (element.nextElementSibling && element.nextElementSibling.matches('input, select, textarea')));
+    for (const dt of document.querySelectorAll('dl > dt')) {
+        if (!visible(dt)) continue;
+        const dd = dt.nextElementSibling;
+        if (dd && dd.tagName === 'DD') push(dt.innerText, dd.innerText);
+    }
+    for (const tr of document.querySelectorAll('table tr')) {
+        if (!visible(tr) || tr.closest('thead')) continue;
+        const cells = Array.from(tr.children).filter(cell => /^(?:TH|TD)$/.test(cell.tagName));
+        if (cells.some(cell => cell.querySelector('input, select, textarea'))) continue;
+        if (cells.length === 2) push(cells[0].innerText, cells[1].innerText);
+        else if (cells.length === 4) {
+            push(cells[0].innerText, cells[1].innerText);
+            push(cells[2].innerText, cells[3].innerText);
+        }
+    }
+    for (const label of document.querySelectorAll('label, .control-label, .field-label, dt, strong, b')) {
+        if (!visible(label) || label.closest('table, dl') || isFormControlLabel(label)) continue;
+        const text = clean(label.innerText);
+        const strongLike = label.matches('strong, b');
+        if (!text || (strongLike && !/:\s*$/u.test(text))) continue;
+        const sibling = label.nextElementSibling;
+        if (sibling && visible(sibling) && !sibling.matches('label, .control-label, .field-label, strong, b')) {
+            push(text, sibling.innerText);
+        } else if (label.parentElement) {
+            const whole = clean(label.parentElement.innerText);
+            if (whole.startsWith(text)) push(text, whole.slice(text.length));
+        }
+    }
+    const heading = Array.from(document.querySelectorAll('h1, h2, h3, .portlet-title, .header-title')).find(visible);
+    const expired = /(?:session.{0,40}(?:expir|ended)|(?:veuillez|please).{0,30}(?:reconnect|connecter))/i;
+    const passwordVisible = Array.from(document.querySelectorAll('input[type="password"]')).some(visible);
+    return {
+        title: heading ? clean(heading.innerText) : (document.title || ''),
+        fields: fields.slice(0, 200),
+        sessionExpired: passwordVisible || expired.test(clean(document.body ? document.body.innerText : '').slice(0, 4000))
+    };
+}"""
+
+_SENSITIVE_QUERY_KEY = re.compile(r"p_auth|token|csrf|session|jsessionid|auth|password|passwd|secret|cookie|credential", re.I)
+
+
+def clean_data_text(value: object, limit: int = 500) -> str:
+    # Données d'entreprise affichées : RC, NIF, téléphones et e-mails doivent rester intacts,
+    # contrairement aux métadonnées de diagnostic filtrées par sanitize_metadata_text.
+    return " ".join(str(value or "").split())[:limit]
+
+
+def sanitize_detail_url(url: str, portal_url: str) -> str:
+    """Garde un lien de fiche sur l'hôte officiel, sans jeton ni identifiant de session."""
+    if not url or not is_portal_host(url, portal_url):
+        return ""
+    parts = urlsplit(url)
+    path = re.sub(r";jsessionid=[^/?#]*", "", parts.path, flags=re.I)
+    query = [
+        (key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if not _SENSITIVE_QUERY_KEY.search(key)
+    ]
+    return urlunsplit(("https", parts.netloc, path, urlencode(query), ""))
 
 
 def session_expired_visible(page: Any) -> bool:
@@ -332,7 +426,7 @@ class PlaywrightSearchDriver:
                         options: list[str] = []
                         if tag_name == "select":
                             options = [
-                                sanitize_metadata_text(value, 160)
+                                clean_data_text(value, 160)
                                 for value in locator.locator("option").all_text_contents()[:400]
                             ]
                         observed[criterion] = {"tag": tag_name, "type": input_type, "options": options}
@@ -1127,15 +1221,25 @@ class PlaywrightSearchDriver:
             if not isinstance(result_count, int) or result_count < 0:
                 result_count = None
             rows: tuple[tuple[str, ...], ...] = ()
+            row_links: tuple[str, ...] = ()
             try:
                 row_data = self._page.evaluate(_ROW_DATA_DOM_SCRIPT)
                 if isinstance(row_data, dict):
                     raw_rows = row_data.get("rows", [])
+                    raw_links = row_data.get("links", [])
+                    if not isinstance(raw_links, list):
+                        raw_links = []
                     if isinstance(raw_rows, list):
-                        rows = tuple(
-                            tuple(sanitize_metadata_text(str(cell), 500) for cell in row)
-                            for row in raw_rows[:500]
+                        kept = [
+                            (row, raw_links[index] if index < len(raw_links) else "")
+                            for index, row in enumerate(raw_rows[:500])
                             if isinstance(row, list)
+                        ]
+                        rows = tuple(
+                            tuple(clean_data_text(cell, 500) for cell in row) for row, _link in kept
+                        )
+                        row_links = tuple(
+                            sanitize_detail_url(str(link or ""), self._portal_url) for _row, link in kept
                         )
             except Exception:
                 pass
@@ -1147,6 +1251,7 @@ class PlaywrightSearchDriver:
                 row_count=max(0, int(raw.get("rowCount", 0))),
                 columns=columns,
                 rows=rows,
+                row_links=row_links if any(row_links) else (),
                 pagination_visible=bool(raw.get("paginationVisible", False)),
                 no_results=bool(raw.get("noResults", False)),
                 errors=errors,
@@ -1158,6 +1263,36 @@ class PlaywrightSearchDriver:
             raise
         except Exception:
             raise SearchResultsObservationError() from None
+
+    def read_detail(self, url: str) -> dict[str, object]:
+        """Ouvre une fiche entreprise du portail et en lit les paires libellé/valeur affichées."""
+        safe_url = sanitize_detail_url(url, self._portal_url)
+        if not safe_url or self._page is None or self._page.is_closed():
+            raise SearchNavigationUnexpected()
+        try:
+            self._page.goto(safe_url, wait_until="domcontentloaded", timeout=self._timeout_ms)
+            self._page.wait_for_timeout(600)
+            if not is_portal_host(self._page.url, self._portal_url):
+                raise SearchNavigationUnexpected()
+            raw = self._page.evaluate(_DETAIL_DOM_SCRIPT)
+        except SearchExecutionError:
+            raise
+        except Exception:
+            raise SearchResultsObservationError() from None
+        if not isinstance(raw, dict):
+            raise SearchResultsObservationError()
+        if raw.get("sessionExpired"):
+            raise SearchSessionExpired()
+        fields = [
+            [clean_data_text(pair[0], 120), clean_data_text(pair[1], 1000)]
+            for pair in raw.get("fields", [])[:200]
+            if isinstance(pair, (list, tuple)) and len(pair) == 2
+        ]
+        return {
+            "url": safe_url,
+            "title": clean_data_text(raw.get("title", ""), 200),
+            "fields": [pair for pair in fields if pair[0] and pair[1]],
+        }
 
     def navigate_next_page(self) -> bool:
         try:

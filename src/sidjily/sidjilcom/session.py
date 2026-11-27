@@ -249,6 +249,10 @@ class SidjilcomSessionManager:
         """Parcourt les pages de résultats suivantes déjà affichées, sans nouvelle soumission."""
         return self._submit_operation("collect_result_pages", max_pages, require_connected=True)
 
+    def read_enterprise_details(self, items: list[tuple[str, str]]) -> Future[list[dict[str, object]]]:
+        """Ouvre et lit les fiches entreprise demandées (clé de résultat, lien assaini)."""
+        return self._submit_operation("read_enterprise_details", list(items), require_connected=True)
+
     def capture_search_controls(self) -> Future[dict[str, dict[str, object]]]:
         """Relève les listes et types de contrôles des deux formulaires, sans saisie ni soumission."""
         return self._submit_operation("capture_search_controls", require_connected=True)
@@ -396,12 +400,15 @@ class SidjilcomSessionManager:
                     command.future.set_result(result)
                 return
 
-            if command.name in ("collect_result_pages", "capture_search_controls"):
+            if command.name in ("collect_result_pages", "capture_search_controls", "read_enterprise_details"):
                 if self.snapshot.state != SessionState.CONNECTED:
                     raise SessionNotConnected()
                 if command.name == "collect_result_pages":
                     (max_pages,) = command.arguments
                     result = browser.collect_result_pages(self.config, max_pages)
+                elif command.name == "read_enterprise_details":
+                    (items,) = command.arguments
+                    result = browser.read_enterprise_details(self.config, items)
                 else:
                     result = browser.capture_search_controls(self.config)
                 if not command.future.done():

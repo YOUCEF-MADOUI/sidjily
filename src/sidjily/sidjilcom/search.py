@@ -157,6 +157,7 @@ class SearchObservation:
     errors: tuple[str, ...]
     session_expired: bool
     rows: tuple[tuple[str, ...], ...] = ()
+    row_links: tuple[str, ...] = ()
     result_zone_found: bool = False
     result_zone_tag: str = ""
 

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import csv
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
+from sidjily.export import write_csv
 from sidjily.models import Search, Status
 from sidjily.sidjilcom.autocomplete import (
     AUTOCOMPLETE_FIELD_LABELS,
@@ -105,6 +105,7 @@ class SidjilyApp:
         self._pending_preparation_draft: Search | None = None
         self._pending_navigation_action = ""
         self._pending_pages_context: tuple[str, tuple[str, ...], int] | None = None
+        self._pending_details_context: tuple[str, Any] | None = None
         self._closing = False
         try:
             apply_observed_controls(self.manager.load_setting(OBSERVED_CONTROLS_SETTING, {}))
@@ -205,6 +206,14 @@ class SidjilyApp:
         self.pause_button = ttk.Button(history_toolbar, text="Suspendre", command=self.pause_selected)
         self.pause_button.pack(side="right")
         ttk.Button(history_toolbar, text="Actualiser", command=self.refresh).pack(side="right", padx=7)
+        self.export_csv_button = ttk.Button(
+            history_toolbar, text="Exporter CSV", command=self._export_csv, state="disabled"
+        )
+        self.export_csv_button.pack(side="right")
+        self.results_button = ttk.Button(
+            history_toolbar, text="Résultats et fiches", command=self._open_results_window, state="disabled"
+        )
+        self.results_button.pack(side="right", padx=7)
 
         columns = ("status", "progress", "created", "criteria")
         self.table = ttk.Treeview(container, columns=columns, show="tree headings", selectmode="browse")
@@ -305,10 +314,6 @@ class SidjilyApp:
             report_toolbar, text="Enregistrer le diagnostic", command=self._save_diagnostic, state="disabled"
         )
         self.save_diagnostic_button.pack(side="left", padx=8)
-        self.export_csv_button = ttk.Button(
-            report_toolbar, text="Exporter CSV", command=self._export_csv, state="disabled"
-        )
-        self.export_csv_button.pack(side="left", padx=8)
         report_frame = ttk.Frame(parent)
         report_frame.pack(fill="x")
         self.diagnostic_text = tk.Text(
@@ -348,6 +353,7 @@ class SidjilyApp:
         else:
             self.selected_search_id = None
             self.details.configure(text="Sélectionnez une recherche pour afficher son journal.")
+        self._refresh_result_buttons()
 
     def new_search(self) -> None:
         """Ouvre directement le formulaire local, sans navigation Sidjilcom."""
@@ -521,6 +527,7 @@ class SidjilyApp:
         self.selected_search_id = selected[0] if selected else None
         if self.selected_search_id:
             self._show_events(self.selected_search_id)
+        self._refresh_result_buttons()
 
     def _show_events(self, search_id: str) -> None:
         search = self.manager.get_search(search_id)
@@ -613,9 +620,7 @@ class SidjilyApp:
             observed = future.result()
         except Exception as exc:
             message = str(exc) if isinstance(exc, (SessionOperationError, SearchExecutionError)) else ""
-            self.diagnostic_output.configure(
-                text="Capture impossible; ouvrez « Trouver une entreprise » puis réessayez. " + message
-            )
+            self._notify("Capture impossible; ouvrez « Trouver une entreprise » puis réessayez. " + message)
             self._refresh_session_status()
             return
         updated = apply_observed_controls(observed)
@@ -631,7 +636,7 @@ class SidjilyApp:
             lines.append(f"- {label} : {detail} · {state}")
         self._set_diagnostic_report("\n".join(lines))
         self.catalog_status.configure(text=self._catalog_status_text())
-        self.diagnostic_output.configure(text=f"Capture terminée : {len(updated)} champ(s) activé(s).")
+        self._notify(f"Capture terminée : {len(updated)} champ(s) activé(s). Les nouveaux formulaires les proposent.")
         self._refresh_session_status()
 
     def _finish_page_collection(self, future: Any) -> None:
@@ -648,17 +653,71 @@ class SidjilyApp:
             pages = []
             interrupted = True
         for offset, page in enumerate(pages, start=2):
-            total += self.manager.store_search_results(search_id, columns, page.rows, page=offset)
+            total += self.manager.store_search_results(
+                search_id, columns, page.rows, page=offset, links=page.row_links,
+            )
             pages_read = offset
         suffix = " Pagination interrompue; les lignes déjà lues sont conservées." if interrupted else ""
-        self.diagnostic_output.configure(
-            text=f"Recherche terminée; {total} ligne(s) collectée(s) sur {pages_read} page(s).{suffix}"
-        )
+        self._notify(f"Recherche terminée; {total} ligne(s) collectée(s) sur {pages_read} page(s).{suffix}")
         if self._diagnostic_report:
             self._set_diagnostic_report(
                 self._diagnostic_report + f"\nTotal collecté : {total} ligne(s) sur {pages_read} page(s).{suffix}"
             )
         self.refresh()
+        self._refresh_session_status()
+
+    def _open_results_window(self) -> None:
+        if not self.selected_search_id or self.manager.get_search_result_count(self.selected_search_id) == 0:
+            messagebox.showinfo("Résultats", "Aucun résultat collecté pour cette recherche.", parent=self.root)
+            return
+        _ResultsWindow(self, self.selected_search_id)
+
+    def _request_enterprise_details(self, search_id: str, items: list[tuple[str, str]], window: Any) -> bool:
+        if self.session_manager.snapshot.state != SessionState.CONNECTED:
+            messagebox.showinfo(
+                "Session requise",
+                "Connectez-vous dans Chromium SIDJILY pour lire les fiches entreprise.",
+                parent=window.window,
+            )
+            return False
+        if self._pending_session_operation is not None and not self._pending_session_operation.done():
+            messagebox.showinfo("Opération en cours", "Attendez la fin de l'opération Sidjilcom en cours.", parent=window.window)
+            return False
+        self._pending_details_context = (search_id, window)
+        self._pending_navigation_action = "read_details"
+        self._pending_session_operation = self.session_manager.read_enterprise_details(items)
+        self._notify(f"Lecture de {len(items)} fiche(s) entreprise en cours…")
+        self._refresh_session_status()
+        return True
+
+    def _finish_enterprise_details(self, future: Any) -> None:
+        context = self._pending_details_context
+        self._pending_details_context = None
+        if context is None:
+            return
+        search_id, window = context
+        try:
+            details = future.result()
+        except Exception as exc:
+            details = []
+            message = str(exc) if isinstance(exc, (SessionOperationError, SearchExecutionError)) else ""
+            self._notify("Lecture des fiches impossible. " + message)
+        stored = self.manager.store_result_details(search_id, details)
+        failures = [detail for detail in details if detail.get("error")]
+        empty = sum(1 for detail in details if not detail.get("error") and not detail.get("fields"))
+        if details:
+            text = f"{stored} fiche(s) enregistrée(s)"
+            if empty:
+                text += f", dont {empty} sans champ reconnu"
+            if failures:
+                text += f"; {len(failures)} échec(s) : {str(failures[-1].get('error', '')).rstrip('.')}"
+            self._notify(text + ".")
+        try:
+            if window.window.winfo_exists():
+                window.reload()
+                window.set_busy(False)
+        except tk.TclError:
+            pass
         self._refresh_session_status()
 
     def _start_page_collection(self, search_id: str, columns: tuple[str, ...], rows_so_far: int) -> bool:
@@ -745,13 +804,21 @@ class SidjilyApp:
         state = "normal" if report else "disabled"
         self.copy_diagnostic_button.configure(state=state)
         self.save_diagnostic_button.configure(state=state)
-        csv_state = "disabled"
+        self._refresh_result_buttons()
+
+    def _refresh_result_buttons(self) -> None:
+        state = "disabled"
         if self.selected_search_id:
             try:
-                csv_state = "normal" if self.manager.get_search_result_count(self.selected_search_id) > 0 else "disabled"
+                state = "normal" if self.manager.get_search_result_count(self.selected_search_id) > 0 else "disabled"
             except Exception:
                 pass
-        self.export_csv_button.configure(state=csv_state)
+        self.export_csv_button.configure(state=state)
+        self.results_button.configure(state=state)
+
+    def _notify(self, text: str) -> None:
+        self.diagnostic_output.configure(text=text)
+        self.footer.configure(text=text)
 
     def _copy_diagnostic(self) -> None:
         if not self._diagnostic_report:
@@ -784,30 +851,28 @@ class SidjilyApp:
     def _export_csv(self) -> None:
         if not self.selected_search_id:
             return
-        results = self.manager.get_search_results(self.selected_search_id)
+        self._export_search_csv(self.selected_search_id, self.root)
+
+    def _export_search_csv(self, search_id: str, parent: tk.Misc) -> None:
+        results = self.manager.get_search_results(search_id)
         if not results:
-            messagebox.showinfo("Export CSV", "Aucun résultat collecté pour cette recherche.", parent=self.root)
+            messagebox.showinfo("Export CSV", "Aucun résultat collecté pour cette recherche.", parent=parent)
             return
-        columns = results[0].get("columns", [])
         destination = filedialog.asksaveasfilename(
-            parent=self.root,
+            parent=parent,
             title="Exporter les résultats en CSV",
             defaultextension=".csv",
-            initialfile=f"sidjily-{self.selected_search_id[:8]}.csv",
+            initialfile=f"sidjily-{search_id[:8]}.csv",
             filetypes=(("Fichier CSV", "*.csv"), ("Tous les fichiers", "*.*")),
         )
         if not destination:
             return
         try:
-            with open(destination, "w", encoding="utf-8-sig", newline="") as csv_file:
-                writer = csv.writer(csv_file)
-                writer.writerow(columns)
-                for result in results:
-                    writer.writerow(result.get("values", []))
+            count = write_csv(destination, results)
         except OSError as exc:
-            messagebox.showerror("Export impossible", str(exc), parent=self.root)
+            messagebox.showerror("Export impossible", str(exc), parent=parent)
             return
-        self.diagnostic_output.configure(text=f"CSV exporté ({len(results)} lignes) : {destination}")
+        self._notify(f"CSV exporté ({count} lignes) : {destination}")
 
     def _request_session_operation(self, future: Any, label: str) -> None:
         if self._pending_session_operation is not None and not self._pending_session_operation.done():
@@ -832,6 +897,9 @@ class SidjilyApp:
             return
         if navigation_action == "collect_pages":
             self._finish_page_collection(future)
+            return
+        if navigation_action == "read_details":
+            self._finish_enterprise_details(future)
             return
         try:
             result = future.result()
@@ -985,7 +1053,7 @@ class SidjilyApp:
             columns = observation.columns
             if observation.rows and columns:
                 rows_stored = self.manager.store_search_results(
-                    search_id, columns, observation.rows, page=1,
+                    search_id, columns, observation.rows, page=1, links=observation.row_links,
                 )
             collecting_more = (
                 observation.pagination_visible and rows_stored > 0
@@ -1015,7 +1083,7 @@ class SidjilyApp:
                 status_text = f"Recherche terminée; {rows_stored} ligne(s) collectée(s)."
             else:
                 status_text = "Recherche terminée; aucune ligne collectée."
-            self.diagnostic_output.configure(text=status_text)
+            self._notify(status_text)
         self.refresh()
         self._refresh_session_status()
 
@@ -1170,6 +1238,156 @@ class SidjilyApp:
             self.root.after(100, self._finish_close_after_session)
         else:
             self.root.destroy()
+
+
+class _ResultsWindow:
+    """Liste des lignes collectées; lecture et affichage des fiches entreprise."""
+
+    MAX_BATCH = 100
+
+    def __init__(self, app: SidjilyApp, search_id: str) -> None:
+        self.app = app
+        self.search_id = search_id
+        self._results: dict[str, dict[str, Any]] = {}
+        self.window = tk.Toplevel(app.root)
+        self.window.title("Résultats et fiches entreprise")
+        self.window.geometry("1100x700")
+        self.window.minsize(760, 480)
+        frame = ttk.Frame(self.window, padding=10)
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=3)
+        frame.rowconfigure(3, weight=2)
+        self.summary = ttk.Label(frame, text="", wraplength=1050)
+        self.summary.grid(row=0, column=0, sticky="w", pady=(0, 6))
+
+        table_frame = ttk.Frame(frame)
+        table_frame.grid(row=1, column=0, sticky="nsew")
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
+        self.table = ttk.Treeview(table_frame, show="headings", selectmode="extended")
+        self.table.grid(row=0, column=0, sticky="nsew")
+        y_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.table.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll = ttk.Scrollbar(table_frame, orient="horizontal", command=self.table.xview)
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        self.table.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        self.table.bind("<<TreeviewSelect>>", lambda _event: self._show_detail())
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=2, column=0, sticky="ew", pady=6)
+        self.read_selected_button = ttk.Button(
+            buttons, text="Lire les fiches sélectionnées", command=self._read_selected
+        )
+        self.read_selected_button.pack(side="left")
+        self.read_missing_button = ttk.Button(
+            buttons, text=f"Lire les fiches manquantes (max {self.MAX_BATCH})", command=self._read_missing
+        )
+        self.read_missing_button.pack(side="left", padx=8)
+        ttk.Button(
+            buttons, text="Exporter CSV", command=lambda: app._export_search_csv(search_id, self.window)
+        ).pack(side="left")
+        ttk.Button(buttons, text="Fermer", command=self.window.destroy).pack(side="right")
+        ttk.Label(
+            frame,
+            text="La lecture des fiches ouvre chaque page de détail dans Chromium SIDJILY (une fiche toutes les ~1,5 s).",
+            foreground="#555555",
+        ).grid(row=4, column=0, sticky="w", pady=(4, 0))
+
+        detail_frame = ttk.Frame(frame)
+        detail_frame.grid(row=3, column=0, sticky="nsew")
+        detail_frame.columnconfigure(0, weight=1)
+        detail_frame.rowconfigure(0, weight=1)
+        self.detail_text = tk.Text(detail_frame, height=10, wrap="word", state="disabled", font=("Consolas", 9))
+        self.detail_text.grid(row=0, column=0, sticky="nsew")
+        detail_scroll = ttk.Scrollbar(detail_frame, orient="vertical", command=self.detail_text.yview)
+        detail_scroll.grid(row=0, column=1, sticky="ns")
+        self.detail_text.configure(yscrollcommand=detail_scroll.set)
+        self.reload()
+
+    @staticmethod
+    def _detail_state(result: dict[str, Any]) -> str:
+        detail = result.get("detail")
+        if detail:
+            return "lue" if detail.get("fields") else "lue (aucun champ reconnu)"
+        return "à lire" if result.get("detail_url") else "pas de lien"
+
+    def reload(self) -> None:
+        results = self.app.manager.get_search_results(self.search_id)
+        self._results = {result["key"]: result for result in results}
+        columns = [str(column) for column in (results[0].get("columns", []) if results else [])] + ["Fiche"]
+        identifiers = [f"c{index}" for index in range(len(columns))]
+        selected = set(self.table.selection())
+        self.table.delete(*self.table.get_children())
+        self.table.configure(columns=identifiers)
+        for identifier, label in zip(identifiers, columns):
+            self.table.heading(identifier, text=label)
+            self.table.column(identifier, width=110 if label == "Fiche" else 160, stretch=True)
+        for result in results:
+            values = [str(value) for value in result.get("values", [])]
+            values = (values + [""] * (len(columns) - 1))[: len(columns) - 1]
+            self.table.insert("", "end", iid=result["key"], values=(*values, self._detail_state(result)))
+        restore = [key for key in selected if key in self._results]
+        if restore:
+            self.table.selection_set(restore)
+        read = sum(1 for result in results if result.get("detail"))
+        linked = sum(1 for result in results if result.get("detail_url"))
+        self.summary.configure(
+            text=f"{len(results)} ligne(s) collectée(s) · {linked} avec lien de fiche · {read} fiche(s) lue(s)."
+            + ("" if linked else " Le portail n'expose pas de lien de fiche exploitable dans le tableau.")
+        )
+        self._show_detail()
+
+    def set_busy(self, busy: bool) -> None:
+        state = "disabled" if busy else "normal"
+        self.read_selected_button.configure(state=state)
+        self.read_missing_button.configure(state=state)
+
+    def _show_detail(self) -> None:
+        selection = self.table.selection()
+        lines: list[str] = []
+        if len(selection) == 1 and selection[0] in self._results:
+            result = self._results[selection[0]]
+            detail = result.get("detail")
+            if detail:
+                lines.append(detail.get("title") or "Fiche entreprise")
+                lines.append(f"Lue le {detail.get('read_at', '')[:19]} (UTC)")
+                lines.append("")
+                width = max((len(label) for label, _value in detail.get("fields", [])), default=0)
+                lines.extend(f"{label.ljust(width)} : {value}" for label, value in detail.get("fields", []))
+                if not detail.get("fields"):
+                    lines.append("Aucune paire libellé/valeur reconnue sur la page de détail.")
+            elif result.get("detail_url"):
+                lines.append("Fiche non lue. Cliquez sur « Lire les fiches sélectionnées ».")
+            else:
+                lines.append("Aucun lien de fiche n'a été trouvé sur cette ligne du tableau de résultats.")
+        elif len(selection) > 1:
+            lines.append(f"{len(selection)} lignes sélectionnées.")
+        else:
+            lines.append("Sélectionnez une ligne pour afficher sa fiche.")
+        self.detail_text.configure(state="normal")
+        self.detail_text.delete("1.0", "end")
+        self.detail_text.insert("1.0", "\n".join(lines))
+        self.detail_text.configure(state="disabled")
+
+    def _request(self, keys: list[str]) -> None:
+        items = [
+            (key, str(self._results[key]["detail_url"]))
+            for key in keys
+            if key in self._results and self._results[key].get("detail_url")
+        ][: self.MAX_BATCH]
+        if not items:
+            messagebox.showinfo("Fiches", "Aucune ligne avec un lien de fiche à lire.", parent=self.window)
+            return
+        if self.app._request_enterprise_details(self.search_id, items, self):
+            self.set_busy(True)
+            self.summary.configure(text=f"Lecture de {len(items)} fiche(s) en cours…")
+
+    def _read_selected(self) -> None:
+        self._request(list(self.table.selection()))
+
+    def _read_missing(self) -> None:
+        self._request([key for key, result in self._results.items() if not result.get("detail")])
 
 
 class _NewSearchDialog:

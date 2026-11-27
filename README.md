@@ -2,7 +2,7 @@
 
 Application de bureau en français pour organiser des recherches sur le portail CNRC/Sidjilcom. Elle fournit une base SQLite, un gestionnaire de tâches persistant et une première intégration de session Sidjilcom manuelle.
 
-La session utilise Playwright/Chromium dans un profil SIDJILY séparé. **L'utilisateur saisit ses identifiants lui-même dans le navigateur visible.** SIDJILY ne lit pas les mots de passe, ne récupère pas le profil Chrome personnel et ne contourne ni authentification, ni CAPTCHA, ni protection anti-bot. Une première recherche réelle strictement cadrée est disponible après récapitulatif et confirmation explicite; aucune collecte détaillée, pagination automatique, export ou reprise de recherche n'est implémentée.
+La session utilise Playwright/Chromium dans un profil SIDJILY séparé. **L'utilisateur saisit ses identifiants lui-même dans le navigateur visible.** SIDJILY ne lit pas les mots de passe, ne récupère pas le profil Chrome personnel et ne contourne ni authentification, ni CAPTCHA, ni protection anti-bot. Une recherche réelle n'est lancée qu'après récapitulatif et confirmation explicite. Les lignes de résultats sont ensuite collectées (pages suivantes comprises), les fiches entreprise peuvent être lues, et le tout s'exporte en CSV.
 
 ## Prérequis
 
@@ -55,17 +55,23 @@ Après ouverture du navigateur, utilisez **Diagnostiquer la page**, **Analyser p
 
 Le bouton **Diagnostiquer le formulaire réel** capture, sur demande explicite, la structure de la page déjà ouverte sans naviguer, remplir, sélectionner une suggestion ni soumettre. Il compare les captures successives et fournit un rapport copiable/sauvegardable sans valeurs de champs, données d'entreprise, cookies, jetons, réponses réseau ou endpoint/API direct. Mode d'emploi PC et limites : [docs/diagnostic-formulaire-reel.md](docs/diagnostic-formulaire-reel.md).
 
-## Première recherche réelle contrôlée — Tâche 16
+## Recherche réelle, collecte, fiches et export
 
-Dans le préparateur, **Lancer la recherche** est distinct de **Enregistrer le brouillon**. Pour cette unique tentative réelle, SIDJILY accepte uniquement **Personne morale**, **Activité = `442102`** et le critère conjoint **Commune/Wilaya = `34000`**. Aucun autre critère n'est permis. Le récapitulatif exact est présenté dans une confirmation Oui/Non; Annuler ou répondre Non ne ferme pas le préparateur et ne déclenche aucune soumission.
+Dans le préparateur, **Lancer la recherche** est distinct de **Enregistrer le brouillon**. Toute combinaison de critères est acceptée dès qu'au moins un critère est renseigné et que chaque champ utilisé a été confirmé sur le portail. Le récapitulatif exact est présenté dans une confirmation Oui/Non; Annuler ou répondre Non ne déclenche aucune soumission.
 
-Après confirmation, SIDJILY vérifie le mode, le portlet et formulaire parent, les deux contrôles par leurs suffixes DOM observés (`_activi` et `_wilcom`), leurs valeurs relues dans le DOM, les champs obligatoires, puis l'unique bouton **Rechercher** associé au formulaire. Pour une autocomplétion, une suggestion n'est acceptée que si le code numérique confirmé est entier et suivi d'un séparateur explicite de libellé; il faut une seule suggestion ainsi correspondante, puis le DOM est revérifié. Une vérification finale du formulaire, des champs et du bouton précède immédiatement l'unique clic normal Playwright. Toute absence, ambiguïté, valeur différente, navigation inattendue ou problème de session arrête le parcours. Les blocages avant le clic montrent maintenant un diagnostic structurel (page, formulaire, champs, suggestion et bouton), sans valeurs saisies, cookies, jetons ni identifiants. Après le clic, seules les métadonnées structurelles sont observées (titre, URL assainie, zone/tableau/lignes, colonnes, compteur, pagination, absence de résultats et erreurs); aucune cellule d'entreprise n'est lue.
+Après confirmation, SIDJILY vérifie le mode, le portlet et formulaire parent, chaque contrôle par son suffixe DOM, les valeurs relues dans le DOM, les champs obligatoires, puis l'unique bouton **Rechercher**. Pour une autocomplétion, une seule suggestion correspondant exactement au code saisi est acceptée. Toute absence, ambiguïté, valeur différente, navigation inattendue ou problème de session arrête le parcours avant le clic.
+
+**Listes déroulantes.** Les options (forme juridique, secteur d'activité, conformité RC, état commerçant, qualité, composants du numéro d'inscription) ne sont pas codées en dur : connectez-vous, ouvrez **Trouver une entreprise**, puis cliquez **Capturer les listes du portail**. SIDJILY lit le type et les options de chaque contrôle pour les deux modes, sans rien saisir ni soumettre, les enregistre dans SQLite et les active dans le préparateur. Un champ reste grisé tant que le portail ne l'a pas montré comme liste avec options (ou comme champ texte pour les composants non confirmés). Recapturez si le portail change ses listes.
+
+**Collecte.** Après la soumission, les lignes du tableau de résultats sont enregistrées, puis SIDJILY parcourt automatiquement les pages suivantes (50 pages au maximum) dans le navigateur, sans relancer la recherche. Les numéros (RC, NIF), téléphones et e-mails affichés sont conservés tels quels.
+
+**Fiches entreprise.** Sélectionnez la recherche, puis **Résultats et fiches**. Pour chaque ligne qui comporte un lien de détail, **Lire les fiches sélectionnées** ou **Lire les fiches manquantes** (100 au maximum par lot, environ une fiche toutes les 1,5 s) ouvre la fiche dans Chromium et enregistre ses paires libellé/valeur. Les liens sont assainis : seul l'hôte officiel HTTPS est accepté, et les jetons (`p_auth`, CSRF) comme les identifiants de session sont retirés. La lecture s'arrête dès que la session expire.
+
+**Export.** **Exporter CSV** produit un fichier UTF-8 avec séparateur `;` (ouverture directe dans Excel en français) : colonnes du tableau, puis une colonne par champ de fiche lu, puis le lien de la fiche.
 
 La réservation persistante autorise une seule soumission possible à la fois. Une interruption au clic ou après lui garde la réservation et interdit tout nouvel essai; si l'étape est `result_unknown`, ne cliquez pas à nouveau sur **Lancer**. Sélectionnez la recherche et utilisez **Diagnostiquer le résultat (lecture seule)** uniquement si la page Sidjilcom est encore affichée; ce diagnostic n'envoie pas de recherche et son rapport s'ajoute à la fiche. Un échec démontré avant le clic devient `failed_before_submission` et n'est pas relancé automatiquement; un résultat non observable après le clic devient `result_unknown` et ne doit jamais être soumis de nouveau.
 
-**Tâche 18 — cause corrigée :** l'ancien contrôle comparait le texte intégral d'une suggestion au seul code numérique. Une suggestion rendue comme code suivi de son libellé officiel était donc rejetée comme non exacte. Le nouveau contrôle conserve le code exact comme critère, accepte seulement le séparateur de libellé explicitement reconnu, exige une suggestion unique et confirme le champ dans le DOM avant le clic. Cette cause est vérifiée dans le code et les tests simulés; elle n'a pas été observée lors d'une session PC par Arena.
-
-**TEST RÉEL : NON EFFECTUÉ PAR ARENA.** Pour votre seul essai depuis votre PC : ouvrez SIDJILY, cliquez **Ouvrir Sidjilcom** et connectez-vous manuellement dans Chromium. Cliquez **Trouver une entreprise**; après ouverture de la page, SIDJILY affiche le préparateur. Si vous avez déjà cette page, vous pouvez également ouvrir le préparateur avec **Nouvelle recherche** ou **Continuer la recherche** sur un brouillon. Choisissez **Personne morale**, saisissez exactement `442102` dans **Activité** et `34000` dans **Commune/Wilaya**, cliquez **Préparer le récapitulatif**, puis **Lancer la recherche**. Vérifiez le récapitulatif et confirmez explicitement une seule fois. Attendez le rapport structurel; si le résultat devient inconnu, n'effectuez aucune nouvelle recherche. Ne partagez jamais votre profil navigateur, cookies, mots de passe ni jetons.
+**Non testé sur le portail réel.** La capture des listes, la détection du lien « page suivante » et l'extraction des fiches s'appuient sur des structures HTML courantes (Liferay) et sont validées par des tests simulés. Le premier essai depuis votre PC dira si le portail les expose ainsi : par exemple, un lien de fiche en `javascript:` ne peut pas être suivi, et la fenêtre **Résultats et fiches** l'indique. Ne partagez jamais votre profil navigateur, cookies, mots de passe ni jetons.
 
 ## Configuration navigateur
 
@@ -92,6 +98,7 @@ Les tests de session injectent un navigateur simulé et n'ont besoin ni d'un com
 - SQLite versionnée, journalisation et reprise des tâches interrompues (socle précédent).
 - Session persistante manuelle dans un profil Chromium SIDJILY dédié, avec détection prudente de connexion et d'expiration.
 - Navigation de validation vers l'accueil, le tableau de bord et « Trouver une entreprise »; diagnostic des libellés visibles sans leurs valeurs.
-- Premier cycle de recherche réelle cadré par confirmation; diagnostic structurel uniquement, sans détails d'entreprise ni collecte/export.
+- Recherche réelle sur confirmation avec tout critère confirmé; listes déroulantes capturées depuis le portail.
+- Collecte des résultats paginés, lecture des fiches entreprise et export CSV.
 
 Voir [docs/architecture.md](docs/architecture.md) et [docs/sidjilcom-navigation.md](docs/sidjilcom-navigation.md) pour les responsabilités, les routes relevées et les limites de validation.

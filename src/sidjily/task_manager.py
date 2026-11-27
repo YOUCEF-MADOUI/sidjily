@@ -829,6 +829,7 @@ class TaskManager:
         rows: tuple[tuple[str, ...], ...],
         *,
         page: int = 1,
+        links: tuple[str, ...] = (),
     ) -> int:
         now = utc_now()
         stored = 0
@@ -849,6 +850,8 @@ class TaskManager:
                     "page": page,
                     "row_index": row_index,
                 }
+                if row_index < len(links) and links[row_index]:
+                    payload["detail_url"] = links[row_index]
                 try:
                     cursor = connection.execute(
                         "INSERT OR IGNORE INTO results(id, search_id, source_task_id, dedupe_key, payload_json, created_at) "
@@ -887,10 +890,52 @@ class TaskManager:
     def get_search_results(self, search_id: str) -> list[dict[str, Any]]:
         with self.database.connection() as connection:
             rows = connection.execute(
-                "SELECT payload_json, created_at FROM results WHERE search_id = ? ORDER BY dedupe_key",
+                "SELECT dedupe_key, payload_json, created_at FROM results WHERE search_id = ?",
                 (search_id,),
             ).fetchall()
-        return [{"created_at": row["created_at"], **json.loads(row["payload_json"])} for row in rows]
+        results = [
+            {"key": row["dedupe_key"], "created_at": row["created_at"], **json.loads(row["payload_json"])}
+            for row in rows
+        ]
+        results.sort(key=lambda item: (int(item.get("page", 0)), int(item.get("row_index", 0))))
+        return results
+
+    def store_result_details(self, search_id: str, details: list[dict[str, Any]]) -> int:
+        """Attache à chaque résultat la fiche lue (titre et paires libellé/valeur)."""
+        now = utc_now()
+        stored = 0
+        with self.database.connection(immediate=True) as connection:
+            for detail in details:
+                key = detail.get("key")
+                fields = detail.get("fields")
+                if not isinstance(key, str) or detail.get("error") or not isinstance(fields, list):
+                    continue
+                row = connection.execute(
+                    "SELECT payload_json FROM results WHERE search_id = ? AND dedupe_key = ?",
+                    (search_id, key),
+                ).fetchone()
+                if row is None:
+                    continue
+                payload = json.loads(row["payload_json"])
+                payload["detail"] = {
+                    "title": str(detail.get("title", ""))[:200],
+                    "fields": [
+                        [str(pair[0])[:120], str(pair[1])[:1000]]
+                        for pair in fields[:200]
+                        if isinstance(pair, (list, tuple)) and len(pair) == 2
+                    ],
+                    "read_at": now,
+                }
+                connection.execute(
+                    "UPDATE results SET payload_json = ? WHERE search_id = ? AND dedupe_key = ?",
+                    (self.database.encode_json(payload), search_id, key),
+                )
+                stored += 1
+            if stored:
+                self.database.add_event(
+                    connection, f"{stored} fiche(s) entreprise enregistrée(s).", search_id=search_id
+                )
+        return stored
 
     def get_search_result_count(self, search_id: str) -> int:
         with self.database.connection() as connection:

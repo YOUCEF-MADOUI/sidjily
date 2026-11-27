@@ -31,6 +31,7 @@ from sidjily.sidjilcom.search import (
     SearchExecutor,
     SearchNavigationUnexpected,
     SearchObservation,
+    SearchSessionExpired,
     SearchStep,
     validate_first_controlled_search,
 )
@@ -681,6 +682,10 @@ class BrowserAdapter(Protocol):
     def collect_result_pages(self, config: SessionConfig, max_pages: int) -> list[SearchObservation]: ...
 
     def capture_search_controls(self, config: SessionConfig) -> dict[str, dict[str, object]]: ...
+
+    def read_enterprise_details(
+        self, config: SessionConfig, items: list[tuple[str, str]]
+    ) -> list[dict[str, object]]: ...
 
     def close(self) -> None: ...
 
@@ -1354,6 +1359,29 @@ class PlaywrightBrowser:
             if not observation.pagination_visible:
                 break
         return pages
+
+    def read_enterprise_details(
+        self, config: SessionConfig, items: list[tuple[str, str]]
+    ) -> list[dict[str, object]]:
+        """Lit les fiches demandées une par une; s'arrête dès que la session expire."""
+        if self._page is None or self._page.is_closed():
+            raise SearchExecutionError("Navigateur Sidjilcom indisponible.", code="browser_unavailable")
+        driver = PlaywrightSearchDriver(
+            self._page, config.url, lambda _mode: None, self._autocomplete_tester,
+            timeout_ms=config.navigation_timeout_ms,
+        )
+        details: list[dict[str, object]] = []
+        for index, (key, url) in enumerate(items):
+            if index:
+                self._page.wait_for_timeout(800)
+            try:
+                details.append({"key": key, **driver.read_detail(url)})
+            except SearchSessionExpired:
+                details.append({"key": key, "error": "Session expirée; lecture des fiches interrompue."})
+                break
+            except SearchExecutionError:
+                details.append({"key": key, "error": "Fiche illisible ou lien hors du portail."})
+        return details
 
     def capture_search_controls(self, config: SessionConfig) -> dict[str, dict[str, object]]:
         """Relève les types et options des contrôles des deux modes; aucun critère n'est saisi."""
