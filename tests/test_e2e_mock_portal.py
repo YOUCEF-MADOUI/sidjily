@@ -71,14 +71,24 @@ class MockPortalEndToEndTests(unittest.TestCase):
         self.assertEqual(observation.result_count, 23)
         self.assertTrue(observation.pagination_visible)
         self.assertEqual(observation.rows[0][:2], ("34/00-0100001 B 19", "AUTHENTIQUE SOCIETE 01"))
+        # Portail réel : pas d'URL de fiche, l'entrée « Details » appelle get_detailpm('ID').
         link = observation.row_links[0]
-        self.assertTrue(link.endswith("/-/fiche/1"))
-        self.assertNotIn("p_auth", link)
-        self.assertNotIn("jsessionid", link)
+        self.assertEqual(link, "sidjilcom-fiche:get_detailpm:34B00000000001")
         pages = self.session.collect_result_pages(49).result(timeout=120)
         self.assertEqual([len(page.rows) for page in pages], [10, 3])
-        details = self.session.read_enterprise_details([("k0", link)]).result(timeout=60)
-        self.assertIn(["NIF", "000340000000001"], details[0]["fields"])
+        # Fiche d'une ligne de la page 1 lue depuis la dernière page, plus une de la page courante.
+        details = self.session.read_enterprise_details(
+            [("k0", link), ("k1", pages[-1].row_links[0])]
+        ).result(timeout=90)
+        fields = details[0]["fields"]
+        self.assertIn(["Information Société — NIF", "000340000000001"], fields)
+        self.assertIn(["Information Société — Raison Sociale / Nom commercial", "AUTHENTIQUE SOCIETE 01"], fields)
+        self.assertIn(["Local commercial — Date début expoiltation", "16/06/2002"], fields)
+        # Libellé répété d'une section à l'autre : deux colonnes distinctes, pas une fusion.
+        self.assertIn(["Information Société — Adresse", "1 rue des Jardins, Bordj Bou Arreridj"], fields)
+        self.assertIn(["Local commercial — Adresse", "Zone d'activité, lot 7"], fields)
+        self.assertFalse(any(label.endswith("Fax") for label, _value in fields))
+        self.assertIn(["Information Société — NIF", "000340000000021"], details[1]["fields"])
         # Une nouvelle recherche fonctionne après la lecture des fiches (navigateur hors formulaire).
         again = self.search({**BASE, "raison_sociale": "authentique"})
         self.assertEqual(again.result_count, 1)
@@ -116,6 +126,27 @@ class MockPortalEndToEndTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "result_too_large")
         self.assertIn("période d'inscription", str(caught.exception))
         self.assertEqual(len(self.portal.state.submissions), submissions + 1)
+
+    def test_href_detail_links_are_still_sanitized_and_read(self) -> None:
+        self.portal.state.detail_style = "href"
+        try:
+            observation = self.search(BASE)
+            link = observation.row_links[0]
+            self.assertTrue(link.endswith("/-/fiche/1"))
+            self.assertNotIn("p_auth", link)
+            self.assertNotIn("jsessionid", link)
+            details = self.session.read_enterprise_details([("k0", link)]).result(timeout=60)
+            self.assertIn(["NIF", "000340000000001"], details[0]["fields"])
+        finally:
+            self.portal.state.detail_style = "action"
+
+    def test_late_autocomplete_initialisation_is_awaited(self) -> None:
+        self.portal.state.autocomplete_init_delay_ms = 2_000
+        try:
+            observation = self.search(BASE)
+        finally:
+            self.portal.state.autocomplete_init_delay_ms = 0
+        self.assertEqual(observation.result_count, 23)
 
     def test_select_criterion_is_submitted_by_label(self) -> None:
         observation = self.search({**BASE, "forme_juridique": "EURL"})

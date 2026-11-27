@@ -25,6 +25,7 @@ from sidjily.sidjilcom.criteria import (
     SearchMode,
     REPORTED_FORM_METHOD,
     SIDJILCOM_CONTROL_MAP,
+    ComponentType,
     resolve_control_name,
 )
 from sidjily.sidjilcom.diagnostics import _css_selector, sanitize_diagnostic_url, sanitize_metadata_text
@@ -184,7 +185,14 @@ _ROW_DATA_DOM_SCRIPT = r"""() => {
             const raw = (a.getAttribute('href') || '').trim();
             return raw && !raw.startsWith('#') && !/^javascript:/i.test(raw);
         });
-        return link ? link.href : '';
+        if (link) return link.href;
+        // Portail réel : menu « Details » dont l'entrée appelle get_detailpm('ID') / get_detailpp('ID').
+        for (const element of tr.querySelectorAll('[onclick]')) {
+            const match = String(element.getAttribute('onclick') || '').trim()
+                .match(/^(get_detailp[mp])\('([0-9A-Za-z]{4,40})'\);?$/);
+            if (match) return 'sidjilcom-fiche:' + match[1] + ':' + match[2];
+        }
+        return '';
     });
     return {headers, rows, links};
 }"""
@@ -265,6 +273,21 @@ _DETAIL_DOM_SCRIPT = r"""() => {
         seen.add(key);
         fields.push([label, value]);
     };
+    // Titre de section le plus proche qui précède l'élément (bandeaux « .tecket » du portail réel).
+    const sectionOf = element => {
+        let current = element;
+        while (current && current !== document.body) {
+            let sibling = current.previousElementSibling;
+            while (sibling) {
+                if (sibling.matches('.tecket')) return clean(sibling.innerText).replace(/\s*:\s*$/u, '');
+                const inner = sibling.querySelectorAll('.tecket');
+                if (inner.length) return clean(inner[inner.length - 1].innerText).replace(/\s*:\s*$/u, '');
+                sibling = sibling.previousElementSibling;
+            }
+            current = current.parentElement;
+        }
+        return '';
+    };
     const isFormControlLabel = element => !!(element.control ||
         element.querySelector('input, select, textarea') ||
         (element.nextElementSibling && element.nextElementSibling.matches('input, select, textarea')));
@@ -288,6 +311,24 @@ _DETAIL_DOM_SCRIPT = r"""() => {
         const text = clean(label.innerText);
         const strongLike = label.matches('strong, b');
         if (!text || (strongLike && !/:\s*$/u.test(text))) continue;
+        const column = label.parentElement;
+        const isColumn = element => /(?:^|\s)col(?:-[\w-]+)?(?:\s|$)/.test(String(element.className || ''));
+        if (column && isColumn(column) && column.parentElement && clean(column.innerText) === text) {
+            const columns = Array.from(column.parentElement.children).filter(isColumn);
+            const index = columns.indexOf(column);
+            // Colonnes paires : libellés; colonnes impaires : valeurs (lignes à 2 ou 4 colonnes).
+            if (index >= 0 && index % 2 === 0 && columns[index + 1]) {
+                // La fiche réelle répète « Adresse », « Code postal »… d'une section à l'autre
+                // (Siège Social, Local commercial, Appartenance du Local) : on préfixe par la section.
+                const section = sectionOf(column);
+                const labelText = text.replace(/\s*:\s*$/u, '');
+                if (visible(columns[index + 1])) {
+                    push(section ? section + ' — ' + labelText : labelText, columns[index + 1].innerText);
+                }
+                continue;
+            }
+            if (index % 2 === 1) continue;
+        }
         const sibling = label.nextElementSibling;
         if (sibling && visible(sibling) && !sibling.matches('label, .control-label, .field-label, strong, b')) {
             push(text, sibling.innerText);
@@ -315,8 +356,17 @@ def clean_data_text(value: object, limit: int = 500) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
+DETAIL_ACTION_TOKEN = re.compile(r"^sidjilcom-fiche:(get_detailp[mp]):([0-9A-Za-z]{4,40})$")
+
+
 def sanitize_detail_url(url: str, portal_url: str) -> str:
-    """Garde un lien de fiche sur l'hôte officiel, sans jeton ni identifiant de session."""
+    """Garde un lien de fiche sur l'hôte officiel, sans jeton ni identifiant de session.
+
+    Le portail réel n'expose pas d'URL de fiche : l'entrée « Details » appelle
+    get_detailpm('ID'). Ce cas est conservé sous la forme stricte sidjilcom-fiche:fonction:ID.
+    """
+    if url and DETAIL_ACTION_TOKEN.match(url):
+        return url
     if not url or not is_portal_host(url, portal_url):
         return ""
     parts = urlsplit(url)
@@ -387,6 +437,7 @@ class PlaywrightSearchDriver:
             raise
         except Exception:
             raise SearchNavigationUnexpected() from None
+        self._wait_for_autocomplete_widgets(mode)
         self._active_form = None
         self._active_button = None
         self._active_mode = mode
@@ -395,6 +446,33 @@ class PlaywrightSearchDriver:
         self._last_diagnostic["stage"] = "form_inspection"
         if not self._active_marker:
             raise SearchNavigationUnexpected()
+
+    def _wait_for_autocomplete_widgets(self, mode: SearchMode, timeout_ms: int = 15_000) -> None:
+        """Le portail réel initialise l'autocomplétion YUI après l'affichage du formulaire : attendre
+        (lecture seule) que chaque champ d'autocomplétion visible du mode porte ses attributs."""
+        suffixes = [
+            mapping.name_suffix for mapping in SIDJILCOM_CONTROL_MAP.values()
+            if mode in mapping.modes and mapping.name_suffix
+            and mapping.component_type is ComponentType.AUTOCOMPLETE and mapping.css_class
+        ]
+        if not suffixes or self._page is None:
+            return
+        script = """(suffixes) => {
+            const inputs = Array.from(document.querySelectorAll('input[name]')).filter(input =>
+                suffixes.some(suffix => input.name.toLowerCase().endsWith(suffix.toLowerCase())) &&
+                input.getClientRects().length > 0);
+            return inputs.length > 0 && inputs.every(input =>
+                input.classList.contains('yui3-aclist-input') && input.getAttribute('aria-autocomplete') === 'list');
+        }"""
+        waited = 0
+        while waited < timeout_ms:
+            try:
+                if self._page.evaluate(script, suffixes):
+                    return
+            except Exception:
+                pass
+            self._page.wait_for_timeout(250)
+            waited += 250
 
     def page_marker(self) -> str:
         if self._page is None or self._page.is_closed():
@@ -1347,6 +1425,9 @@ class PlaywrightSearchDriver:
         safe_url = sanitize_detail_url(url, self._portal_url)
         if not safe_url or self._page is None or self._page.is_closed():
             raise SearchNavigationUnexpected()
+        action = DETAIL_ACTION_TOKEN.match(safe_url)
+        if action:
+            return self._read_detail_by_action(safe_url, action.group(1), action.group(2))
         try:
             self._page.goto(safe_url, wait_until="domcontentloaded", timeout=self._timeout_ms)
             self._page.wait_for_timeout(600)
@@ -1368,6 +1449,66 @@ class PlaywrightSearchDriver:
         ]
         return {
             "url": safe_url,
+            "title": clean_data_text(raw.get("title", ""), 200),
+            "fields": [pair for pair in fields if pair[0] and pair[1]],
+        }
+
+    def _read_detail_by_action(self, token: str, function: str, ident: str) -> dict[str, object]:
+        """Ouvre la fiche comme l'interface du portail (menu « Details »), dans l'onglet qu'il crée."""
+        self._require_search_page()
+        try:
+            if not self._page.evaluate("name => typeof window[name] === 'function'", function):
+                raise SearchNavigationUnexpected()
+            item = self._page.locator(f"a.dropdown-item[onclick^=\"{function}('{ident}')\"]")
+            with self._page.context.expect_page(timeout=self._results_timeout_ms) as popup:
+                if item.count() == 1:
+                    toggle = item.locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' dropdown ')][1]//*[contains(concat(' ', normalize-space(@class), ' '), ' dropdown-toggle ')]")
+                    if toggle.count() >= 1 and not item.is_visible():
+                        toggle.first.click(timeout=self._timeout_ms)
+                    item.click(timeout=self._timeout_ms)
+                else:
+                    # Ligne d'une autre page de résultats : même fonction du portail, même identifiant.
+                    self._page.evaluate("([name, id]) => window[name](id)", [function, ident])
+            detail_page = popup.value
+        except SearchExecutionError:
+            raise
+        except Exception:
+            raise SearchResultsObservationError() from None
+        try:
+            try:
+                detail_page.wait_for_load_state("domcontentloaded", timeout=self._results_timeout_ms)
+            except Exception:
+                pass
+            if not is_portal_host(detail_page.url, self._portal_url):
+                raise SearchNavigationUnexpected()
+            raw: object = None
+            waited = 0
+            while waited <= self._results_timeout_ms:
+                raw = detail_page.evaluate(_DETAIL_DOM_SCRIPT)
+                if isinstance(raw, dict) and (raw.get("fields") or raw.get("sessionExpired")):
+                    break
+                detail_page.wait_for_timeout(1_000)
+                waited += 1_000
+        except SearchExecutionError:
+            raise
+        except Exception:
+            raise SearchResultsObservationError() from None
+        finally:
+            try:
+                detail_page.close()
+            except Exception:
+                pass
+        if not isinstance(raw, dict):
+            raise SearchResultsObservationError()
+        if raw.get("sessionExpired"):
+            raise SearchSessionExpired()
+        fields = [
+            [clean_data_text(pair[0], 120), clean_data_text(pair[1], 1000)]
+            for pair in raw.get("fields", [])[:200]
+            if isinstance(pair, (list, tuple)) and len(pair) == 2
+        ]
+        return {
+            "url": token,
             "title": clean_data_text(raw.get("title", ""), 200),
             "fields": [pair for pair in fields if pair[0] and pair[1]],
         }

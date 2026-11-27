@@ -69,7 +69,10 @@ class PortalState:
     secteur_placeholder_value: str = "0"
     date_input_type: str = "date"
     detail_links: bool = True
+    # « action » : comme le portail réel, menu Details → get_detailpm('ID') ouvre la fiche dans un onglet.
+    detail_style: str = "action"
     session_expired: bool = False
+    autocomplete_init_delay_ms: int = 0
     # Portail réel : la réponse à « Rechercher » arrive en AJAX après 10 à 20 s.
     results_delay_ms: int = 0
     # Portail réel : au-delà de 300 lignes, refus « Résultat de la Recherche Trop Grand ».
@@ -78,7 +81,10 @@ class PortalState:
 
 
 _AUTOCOMPLETE_JS = """
-document.querySelectorAll('input.yui3-aclist-input').forEach(input => {
+// Portail réel : YUI ajoute classe et attributs d'autocomplétion après l'affichage du formulaire.
+setTimeout(() => document.querySelectorAll('input[data-autocomplete]').forEach(input => {
+  input.classList.add('yui3-aclist-input');
+  input.setAttribute('aria-autocomplete', 'list');
   const source = JSON.parse(input.dataset.source);
   const box = document.getElementById(input.getAttribute('aria-controls'));
   const list = box.querySelector('ul');
@@ -104,7 +110,7 @@ document.querySelectorAll('input.yui3-aclist-input').forEach(input => {
     box.style.display = show ? 'block' : 'none';
     input.setAttribute('aria-expanded', show ? 'true' : 'false');
   });
-});
+}), AUTOCOMPLETE_INIT_DELAY_MS);
 window.YUI = function () {};
 """
 
@@ -129,7 +135,7 @@ def _autocomplete(label: str, suffix: str, source: list[str]) -> str:
     data = html.escape(json.dumps(source), quote=True)
     return (f'<div class="row"><label for="{NS}{suffix}">{label}</label>'
             f'<input type="text" id="{NS}{suffix}" name="{NS}{suffix}" value="" autocomplete="off" '
-            f'class="field yui3-aclist-input" aria-autocomplete="list" aria-expanded="false" '
+            f'class="field" data-autocomplete="1" aria-expanded="false" '
             f'aria-controls="{NS}{suffix}_aclist" data-source="{data}">'
             f'<div id="{NS}{suffix}_aclist" class="yui3-aclist" style="display:none">'
             f'<ul class="yui3-aclist-list" role="listbox"></ul></div></div>')
@@ -222,7 +228,8 @@ def search_page(state: PortalState, mode: str | None, results_html: str = "") ->
     form = search_form(state, mode) if mode else "<p>Choisissez un type de personne.</p>"
     body = (f'<section id="p_p_id{NS}" class="portlet-boundary portlet-boundary{NS}">'
             f'<h2 class="portlet-title">Recherche Commerçant</h2>{INTRO_ALERT}{links}{form}{results_html}</section>'
-            f'<script>{_AUTOCOMPLETE_JS}</script>')
+            f'<script>{_AUTOCOMPLETE_JS.replace("AUTOCOMPLETE_INIT_DELAY_MS", str(state.autocomplete_init_delay_ms))}'
+            f'{_DETAIL_ACTION_JS}</script>')
     return _page("Recherche Commerçant - Sidjilcom", body)
 
 
@@ -252,8 +259,15 @@ def results_html(state: PortalState, page: int) -> str:
     page = max(1, min(page, pages))
     rows = []
     for company in hits[(page - 1) * PAGE_SIZE: page * PAGE_SIZE]:
-        link = (f'<a href="{DEFAULT_ENTERPRISE_SEARCH_ROUTE}/-/fiche/{company.ident}?p_auth=XYZ987&jsessionid=S1">Détail</a>'
-                if state.detail_links else '<a href="javascript:;" onclick="void(0)">Détail</a>')
+        if not state.detail_links:
+            link = '<a href="javascript:;" onclick="void(0)">Détail</a>'
+        elif state.detail_style == "action":
+            link = (f'<div class="dropdown"><button class="btn btn-secondary dropdown-toggle" type="button">Details</button>'
+                    f'<div class="dropdown-menu" style="display:none">'
+                    f'<a class="dropdown-item" onclick="get_detailpm(\'{detail_id(company)}\')"><span>Details</span></a>'
+                    f'<a class="dropdown-item grisee" onclick="goToAbonnement()"><span>BOAL</span></a></div></div>')
+        else:
+            link = f'<a href="{DEFAULT_ENTERPRISE_SEARCH_ROUTE}/-/fiche/{company.ident}?p_auth=XYZ987&jsessionid=S1">Détail</a>'
         rows.append(
             f"<tr><td>{html.escape(company.rc)}</td><td>{html.escape(company.name)}</td>"
             f"<td>{company.forme}</td><td>{html.escape(company.wilaya)}</td><td>{link}</td></tr>"
@@ -271,6 +285,51 @@ def results_html(state: PortalState, page: int) -> str:
     return (f'<small class="search-results">Affichage des résultats {first} - {last} parmi {len(hits)}.</small>'
             '<table class="table"><thead><tr><th>N° RC</th><th>Raison sociale</th><th>Forme juridique</th>'
             f'<th>Wilaya</th><th>Action</th></tr></thead><tbody>{"".join(rows)}</tbody></table>{pagination}')
+
+
+def detail_id(company: Company) -> str:
+    return f"34B{company.ident:011d}"
+
+
+_DETAIL_ACTION_JS = """
+document.querySelectorAll('.dropdown-toggle').forEach(button => button.addEventListener('click', () => {
+  const menu = button.parentElement.querySelector('.dropdown-menu');
+  menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+}));
+function goToAbonnement() {}
+function get_detailpm(id) {
+  // Portail réel : requête AJAX puis ouverture de la fiche dans un nouvel onglet.
+  setTimeout(() => window.open('""" + DEFAULT_ENTERPRISE_SEARCH_ROUTE + """/-/fiche/' + id), 800);
+}
+"""
+
+
+def _pair(label: str, value: str) -> str:
+    return (f'<div class="row"><div class="col-md-6 col-sm-12"><div class="row">'
+            f'<div class="col-md-6 col-sm-12"><label>{html.escape(label)}</label></div>'
+            f'<div class="col-md-6 col-sm-12"><label>{html.escape(value)}</label></div></div></div></div>')
+
+
+def detail_page_real(company: Company) -> str:
+    """Fiche telle que l'affiche le portail réel : onglets et colonnes libellé | valeur."""
+    body = ('<div class="rech-nav-container"><ul class="nav nav-tabs"><li class="nav-item">'
+            '<a class="nav-link active" href="#tab_0">Société</a></li></ul></div>'
+            '<div class="tab-content"><div id="tab_0" class="tab-pane active"><fieldset>'
+            '<div class="tecket"><span>Information Société</span></div>'
+            + _pair("Numéro d'inscription", company.rc)
+            + _pair("Raison Sociale / Nom commercial", company.name)
+            + _pair("NIF", company.nif)
+            + _pair("Forme Juridique", company.forme)
+            + _pair("Adresse", company.adresse)
+            + _pair("Fax", "").replace("<label></label>", "")
+            + '<hr class="red-line"><div class="tecket"><span>Local commercial</span></div>'
+            + _pair("Adresse", "Zone d'activité, lot 7")
+            + '<div class="row"><div class="col-md-3"><label>Nom commercial</label></div>'
+              f'<div class="col-md-3"><label>{html.escape(company.name)}</label></div>'
+              '<div class="col-md-3"><label>Date début expoiltation :</label></div>'
+              '<div class="col-md-3"><label>16/06/2002</label></div></div>'
+            + '</fieldset></div></div>')
+    return _page(company.name, body)
 
 
 def detail_page(company: Company) -> str:
@@ -318,9 +377,13 @@ class MockPortal:
             else:
                 body = search_page(state, mode)
         elif path.startswith(f"{DEFAULT_ENTERPRISE_SEARCH_ROUTE}/-/fiche/"):
-            ident = int(path.rsplit("/", 1)[-1])
-            company = next(item for item in state.companies if item.ident == ident)
-            body = detail_page(company)
+            key = path.rsplit("/", 1)[-1]
+            if key.startswith("34B"):
+                company = next(item for item in state.companies if detail_id(item) == key)
+                body = detail_page_real(company)
+            else:
+                company = next(item for item in state.companies if item.ident == int(key))
+                body = detail_page(company)
         elif path == "/group/sidjilcom/mon-tableau-de-bord":
             body = _page("Tableau de bord", "<h1>Tableau de bord</h1>")
         else:
