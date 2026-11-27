@@ -75,8 +75,11 @@ class SearchFormUnsafe(SearchExecutionError):
 
 
 class SearchSuggestionMissing(SearchExecutionError):
-    def __init__(self, *, diagnostic: dict[str, object] | None = None) -> None:
-        super().__init__("La suggestion exacte attendue est absente ou ambiguë; la recherche a été arrêtée.", code="suggestion_missing", diagnostic=diagnostic)
+    def __init__(self, *, diagnostic: dict[str, object] | None = None, detail: str = "") -> None:
+        message = "La suggestion exacte attendue est absente ou ambiguë; la recherche a été arrêtée."
+        if detail:
+            message = f"{message} {detail}"
+        super().__init__(message, code="suggestion_missing", diagnostic=diagnostic)
 
 
 class SearchSessionExpired(SearchExecutionError):
@@ -232,6 +235,20 @@ def _normalized_suggestion(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value.casefold())
     plain = "".join(character for character in normalized if not unicodedata.combining(character))
     return re.sub(r"\s+", " ", plain).strip()
+
+
+_CODE_THEN_LABEL = re.compile(r"^\d+\s*[:\-|–—]\s*(.+)$")
+_LABEL_THEN_CODE = re.compile(r"^(.+?)\s*[(\[]\s*\d+\s*[)\]]$")
+
+
+def _label_key(value: str) -> str:
+    return re.sub(r"[\s\-'’_.]+", " ", value).strip()
+
+
+def _format_suggestion_choices(texts: list[str], limit: int = 5) -> str:
+    shown = [" ".join(text.split())[:60] for text in texts[:limit]]
+    more = f" (+{len(texts) - limit})" if len(texts) > limit else ""
+    return " · ".join(shown) + more
 
 
 def _autocomplete_field_id(criterion: str) -> str:
@@ -700,7 +717,22 @@ class SearchExecutor:
                 "exact_code_match_count": len(exact),
                 "selection_required": True,
             }
-            raise SearchSuggestionMissing(diagnostic=diagnostic)
+            texts = [option.text for option in observation.suggestions if option.text.strip()]
+            if len(exact) > 1:
+                detail = (
+                    f"Plusieurs suggestions correspondent pour « {item.label} » : "
+                    f"{_format_suggestion_choices([option.text for option in exact])}. Saisissez le code exact."
+                )
+            elif not exact and texts:
+                detail = (
+                    f"Aucune suggestion ne correspond à la saisie pour « {item.label} ». "
+                    f"Proposées : {_format_suggestion_choices(texts)}. Saisissez le code ou l'intitulé exact."
+                )
+            elif not exact:
+                detail = f"Le portail n'a proposé aucune suggestion pour « {item.label} »."
+            else:
+                detail = f"La suggestion trouvée pour « {item.label} » n'est pas sélectionnable."
+            raise SearchSuggestionMissing(diagnostic=diagnostic, detail=detail)
         selected = self._driver.select_autocomplete(observation.token, exact[0].index)
         if (
             not selected.accepted
@@ -733,7 +765,14 @@ class SearchExecutor:
         candidate = _normalized_suggestion(observed)
         if candidate == target:
             return True
-        if not target.isdigit() or not candidate.startswith(target) or len(candidate) <= len(target):
+        if not target.isdigit():
+            # Un nom saisi doit correspondre à l'intitulé complet d'une suggestion « code : intitulé ».
+            for pattern in (_CODE_THEN_LABEL, _LABEL_THEN_CODE):
+                match = pattern.match(candidate)
+                if match and _label_key(match.group(1)) == _label_key(target):
+                    return True
+            return _label_key(candidate) == _label_key(target)
+        if not candidate.startswith(target) or len(candidate) <= len(target):
             return False
         tail = candidate[len(target):].strip()
         # N'accepte ni préfixe numérique voisin ni libellé libre; le code doit être

@@ -371,6 +371,38 @@ class SearchExecutorTests(unittest.TestCase):
         self.assertEqual(caught.exception.diagnostic["autocomplete"]["exact_code_match_count"], 0)
         self.assertEqual(caught.exception.diagnostic["current_field"], "commune_wilaya")
 
+    def test_name_is_matched_against_the_label_of_a_single_suggestion(self) -> None:
+        criteria = criteria_from_mapping({"mode": "PERSONNE_MORALE", "commune_wilaya": "bordj-bou-arréridj"})
+        driver = FakeSearchDriver()
+        driver.autocomplete_suggestions = ("34100 : RAS EL OUED", "34000 : BORDJ BOU ARRERIDJ")
+        SearchExecutor(driver).execute(criteria, confirmed=True)
+        self.assertEqual(driver.autocomplete_selected, [1])
+        self.assertEqual(driver.filled_values["commune_wilaya"], "34000 : BORDJ BOU ARRERIDJ")
+        self.assertEqual(driver.submissions, 1)
+
+    def test_homonym_or_partial_names_stop_and_list_the_choices(self) -> None:
+        cases = {
+            "bordj bou arreridj": ("34000 : BORDJ BOU ARRERIDJ", "34001 : BORDJ BOU ARRERIDJ"),
+            "bordj": ("34000 : BORDJ BOU ARRERIDJ", "34100 : RAS EL OUED"),
+        }
+        for value, suggestions in cases.items():
+            with self.subTest(value=value):
+                criteria = criteria_from_mapping({"mode": "PERSONNE_MORALE", "commune_wilaya": value})
+                driver = FakeSearchDriver()
+                driver.autocomplete_suggestions = suggestions
+                with self.assertRaises(SearchSuggestionMissing) as caught:
+                    SearchExecutor(driver).execute(criteria, confirmed=True)
+                self.assertEqual(driver.submissions, 0)
+                self.assertIn("34000 : BORDJ BOU ARRERIDJ", str(caught.exception))
+
+    def test_suggestion_matching_rules(self) -> None:
+        matches = SearchExecutor._suggestion_matches
+        self.assertTrue(matches("Bordj Bou Arreridj", "BORDJ-BOU-ARRERIDJ (34)"))
+        self.assertTrue(matches("34000", "34000 : BORDJ BOU ARRERIDJ"))
+        self.assertFalse(matches("3400", "34000 : BORDJ BOU ARRERIDJ"))
+        self.assertFalse(matches("bordj", "34000 : BORDJ BOU ARRERIDJ"))
+        self.assertFalse(matches("arreridj", "34000 : BORDJ BOU ARRERIDJ"))
+
     def test_ambiguous_duplicate_exact_autocomplete_suggestions_stop_without_submit(self) -> None:
         criteria = criteria_from_mapping({
             "mode": "PERSONNE_MORALE", "commune_wilaya": "34000"

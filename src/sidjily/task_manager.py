@@ -761,7 +761,7 @@ class TaskManager:
             )
 
     def fail_controlled_search(self, search_id: str, error: str) -> None:
-        safe_error = error.strip()[:240] or "Erreur de recherche contrôlée."
+        safe_error = error.strip()[:600] or "Erreur de recherche contrôlée."
         now = utc_now()
         with self.database.connection(immediate=True) as connection:
             task = connection.execute(

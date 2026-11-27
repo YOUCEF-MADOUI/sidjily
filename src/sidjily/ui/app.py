@@ -1025,10 +1025,9 @@ class SidjilyApp:
                 f"ID : {search_id}\nÉtape : {search.step}\n{status_line}\n"
                 f"Erreur : {error}\n"
                 + ("\n" + "\n".join(detail_lines) if detail_lines else "")
-                + "\n\nTEST RÉEL : un test ne peut être effectué que depuis votre PC avec votre session Sidjilcom.\n"
-                "TEST RÉEL : NON EFFECTUÉ PAR ARENA."
             )
-            self.diagnostic_output.configure(text=status_line)
+            self._notify(f"{status_line} {error}")
+            messagebox.showwarning("Recherche arrêtée", f"{status_line}\n\n{error}", parent=self.root)
         except Exception:
             error = "Erreur interne; détails techniques omis pour protéger la session et les critères."
             self.manager.fail_controlled_search(search_id, error)
@@ -1042,9 +1041,10 @@ class SidjilyApp:
             self._set_diagnostic_report(
                 "RECHERCHE SIDJILCOM CONTRÔLÉE — arrêtée sans nouvelle tentative\n"
                 f"ID : {search_id}\nÉtape : {search.step}\n{status_line}\n"
-                f"Erreur : {error}\nTEST RÉEL : NON EFFECTUÉ PAR ARENA."
+                f"Erreur : {error}"
             )
-            self.diagnostic_output.configure(text=status_line)
+            self._notify(f"{status_line} {error}")
+            messagebox.showwarning("Recherche arrêtée", f"{status_line}\n\n{error}", parent=self.root)
         else:
             summary = observation.to_mapping()
             self.manager.complete_controlled_search(search_id, summary)
