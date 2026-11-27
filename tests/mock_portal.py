@@ -11,6 +11,7 @@ from __future__ import annotations
 import html
 import os
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from urllib.parse import parse_qs, urlsplit
 
 from sidjily.sidjilcom.autocomplete import AutocompleteTester
@@ -40,6 +41,7 @@ class Company:
     activite: str
     nif: str
     adresse: str
+    date_immat: str = "2010-01-01"
 
 
 def _companies() -> list[Company]:
@@ -54,6 +56,8 @@ def _companies() -> list[Company]:
             activite=ACTIVITES[0],
             nif=f"0003400{index:08d}",
             adresse=f"{index} rue des Jardins, Bordj Bou Arreridj",
+            # Inscriptions réparties de 1992 à 2026 pour le découpage par périodes.
+            date_immat=(date(2026, 6, 1) - timedelta(days=index * 540)).isoformat(),
         ))
     rows.append(Company(99, "16/00-0999999 B 20", "AUTRE SPA", "SPA", WILAYAS[2], ACTIVITES[1],
                         "000160000000099", "Alger centre"))
@@ -256,6 +260,10 @@ def _matches(company: Company, criteria: dict[str, str]) -> bool:
     if value("wilcom") and value("wilcom") != company.wilaya:
         return False
     if value("activite") and value("activite") != company.activite:
+        return False
+    if value("deb_immat") and company.date_immat < value("deb_immat"):
+        return False
+    if value("fin_immat") and company.date_immat > value("fin_immat"):
         return False
     forme = value("forme_juridi")
     if forme and forme.isdigit() and FORMES[int(forme) - 1] != company.forme:

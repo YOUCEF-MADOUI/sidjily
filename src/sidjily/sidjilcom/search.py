@@ -175,6 +175,8 @@ class SearchObservation:
     result_zone_found: bool = False
     result_zone_tag: str = ""
     too_many_results: bool = False
+    # Découpage par périodes après un refus « Trop Grand » : une ligne par fenêtre.
+    period_report: tuple[str, ...] = ()
 
     @property
     def has_results_page(self) -> bool:
@@ -199,6 +201,7 @@ class SearchObservation:
             "pagination_visible": self.pagination_visible,
             "no_results": self.no_results,
             "too_many_results": self.too_many_results,
+            "period_report": list(self.period_report),
             "errors": list(self.errors),
             "session_expired": self.session_expired,
             "result_zone_found": self.result_zone_found,

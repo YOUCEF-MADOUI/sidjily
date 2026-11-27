@@ -464,6 +464,8 @@ class SidjilyApp:
                 on_pre_submit=lambda diagnostic: self.manager.update_controlled_search_pre_submit_diagnostic(
                     search.id, diagnostic
                 ),
+                # « Trop Grand » (> 300) : découpage automatique par périodes d'inscription.
+                split_periods=True,
             )
         except (ValueError, SessionOperationError, SearchExecutionError) as exc:
             messagebox.showerror("Recherche non lancée", str(exc), parent=self.root)
@@ -1083,6 +1085,12 @@ class SidjilyApp:
                 f"Message aucun résultat : {'oui' if observation.no_results else 'non'}",
                 "Erreurs : " + (" · ".join(observation.errors) if observation.errors else "aucune détectée"),
             ]
+            if observation.period_report:
+                report.append(
+                    "Plus de 300 résultats : recherche découpée par période d'inscription "
+                    "(10 ans, puis 5, 2, 1 an, 6 mois pour les périodes encore trop grandes) :"
+                )
+                report.extend(f"  · {line}" for line in observation.period_report)
             self._set_diagnostic_report("\n".join(report))
             if collecting_more:
                 status_text = f"Page 1 : {rows_stored} ligne(s) collectée(s); parcours des pages suivantes en cours…"

@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -170,6 +171,29 @@ class MockPortalEndToEndTests(unittest.TestCase):
 
         with self.assertRaises(CriteriaValidationError):
             criteria_from_mapping({**BASE, "etat_commercant": "Inconnu"})
+
+    def test_too_large_search_is_split_by_registration_periods(self) -> None:
+        self.portal.state.max_results = 4
+        submissions = len(self.portal.state.submissions)
+        try:
+            observation = self.session.execute_search(
+                criteria_from_mapping(BASE), confirmed=True, split_periods=True
+            ).result(timeout=600)
+        finally:
+            self.portal.state.max_results = 300
+        names = [row[1] for row in observation.rows]
+        self.assertEqual(len(names), 23)
+        self.assertEqual(len(set(names)), 23)
+        self.assertEqual(observation.result_count, 23)
+        self.assertTrue(any("découpée" in line for line in observation.period_report))
+        self.assertTrue(any("ligne(s)" in line for line in observation.period_report))
+        self.assertGreater(len(self.portal.state.submissions) - submissions, 4)
+        windows = [
+            (form.get(f"{NS}deb_immat"), form.get(f"{NS}fin_immat"))
+            for form in self.portal.state.submissions[submissions + 1:]
+        ]
+        self.assertEqual(windows[0][1], date.today().isoformat())
+        self.assertTrue(all(lower and upper and lower <= upper for lower, upper in windows))
 
     def test_select_criterion_is_submitted_by_label(self) -> None:
         observation = self.search({**BASE, "forme_juridique": "EURL"})

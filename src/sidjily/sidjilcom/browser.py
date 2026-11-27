@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import date
 import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -27,11 +28,13 @@ from sidjily.sidjilcom.diagnostics import (
     sanitize_metadata_text,
 )
 from sidjily.sidjilcom.criteria import SearchMode
+from sidjily.sidjilcom.periods import DEFAULT_START, PeriodPlan, with_period
 from sidjily.sidjilcom.search import (
     SearchExecutionError,
     SearchExecutor,
     SearchNavigationUnexpected,
     SearchObservation,
+    SearchResultTooLarge,
     SearchSessionExpired,
     SearchStep,
     validate_first_controlled_search,
@@ -691,6 +694,10 @@ class BrowserAdapter(Protocol):
     def close(self) -> None: ...
 
 
+# Erreurs survenues avant le clic « Rechercher » : relancer la fenêtre ne soumet rien deux fois.
+_PRE_SUBMISSION_RETRY_CODES = frozenset({"mode_selection_failed", "mode_unavailable", "wrong_page", "browser_unavailable"})
+
+
 class BrowserProfileInUse(RuntimeError):
     """Le profil SIDJILY est déjà ouvert par un autre Chromium (autre instance de SIDJILY)."""
 
@@ -1340,7 +1347,25 @@ class PlaywrightBrowser:
             )
         try:
             self._click_mode_candidate(candidate, config)
-            self._wait_for_search_portlet(candidate.frame)
+            # Le clic sur la carte charge une nouvelle page : la vérifier pendant la navigation échoue.
+            try:
+                self._page.wait_for_load_state("domcontentloaded", timeout=config.navigation_timeout_ms)
+            except Exception:
+                pass
+            for attempt in range(3):
+                frame = candidate.frame
+                try:
+                    if frame.is_detached():
+                        frame = self._page.main_frame
+                except Exception:
+                    frame = self._page.main_frame
+                try:
+                    self._wait_for_search_portlet(frame)
+                    break
+                except SearchModeAnalysisError:
+                    if attempt == 2:
+                        raise
+                    self._page.wait_for_timeout(1_500)
             if self._page is None or self._page.is_closed():
                 raise SearchNavigationUnexpected()
             if not is_portal_host(self._page.url, config.url):
@@ -1354,6 +1379,103 @@ class PlaywrightBrowser:
             ) from None
 
     def execute_search(
+        self,
+        config: SessionConfig,
+        criteria: Any,
+        *,
+        confirmed: bool = False,
+        on_step: Callable[[SearchStep], None] | None = None,
+        on_pre_submit: Callable[[dict[str, object]], None] | None = None,
+        split_periods: bool = False,
+    ) -> SearchObservation:
+        try:
+            return self._execute_single_search(
+                config, criteria, confirmed=confirmed, on_step=on_step, on_pre_submit=on_pre_submit
+            )
+        except SearchResultTooLarge:
+            if not split_periods:
+                raise
+        return self._execute_search_by_periods(config, criteria, on_step=on_step)
+
+    def _execute_search_by_periods(
+        self,
+        config: SessionConfig,
+        criteria: Any,
+        *,
+        on_step: Callable[[SearchStep], None] | None = None,
+    ) -> SearchObservation:
+        """Après « Trop Grand » : même recherche par périodes d'inscription (10, 5, 2, 1 an, 6 mois)."""
+        start = date.fromisoformat(criteria.common.date_inscription_du) if criteria.common.date_inscription_du else DEFAULT_START
+        end = date.fromisoformat(criteria.common.date_inscription_au) if criteria.common.date_inscription_au else date.today()
+        rows: list[tuple[str, ...]] = []
+        links: list[str] = []
+        seen: set[tuple[str, ...]] = set()
+        columns: tuple[str, ...] = ()
+        last: list[SearchObservation] = []
+
+        def run_window(lower: date, upper: date) -> tuple[str, int]:
+            nonlocal columns
+            observation = None
+            for attempt in range(2):
+                try:
+                    observation = self._execute_single_search(
+                        config, with_period(criteria, lower, upper), confirmed=True, on_step=on_step,
+                    )
+                    break
+                except SearchResultTooLarge:
+                    return "too_large", 0
+                except SearchExecutionError as exc:
+                    # Échec démontré avant tout clic (mode, page) : une seule nouvelle tentative.
+                    if attempt == 0 and exc.code in _PRE_SUBMISSION_RETRY_CODES:
+                        self._page.wait_for_timeout(2_000)
+                        continue
+                    return "error", 0, str(exc)[:200]
+            last[:] = [observation]
+            if observation.no_results or not observation.rows:
+                return "no_results", 0
+            pages = [observation]
+            if observation.pagination_visible or (observation.result_count or 0) > len(observation.rows):
+                pages += self.collect_result_pages(config, 49)
+            columns = columns or observation.columns
+            added = 0
+            for page in pages:
+                page_links = page.row_links or ("",) * len(page.rows)
+                for row, link in zip(page.rows, page_links):
+                    if row in seen:
+                        continue
+                    seen.add(row)
+                    rows.append(row)
+                    links.append(link)
+                    added += 1
+            announced = observation.result_count
+            collected = sum(len(page.rows) for page in pages)
+            if announced is not None and collected < announced:
+                # Pagination interrompue (portail lent, session) : signalé dans le rapport.
+                return "collected", added, f"incomplète : {collected}/{announced} lues"
+            return "collected", added
+
+        # La période complète vient d'être refusée : si elle a des bornes explicites, elle n'est pas resoumise.
+        refused = {(start, end)} if criteria.common.date_inscription_du and criteria.common.date_inscription_au else set()
+        outcomes = PeriodPlan(start, end).run(run_window, refused=refused)
+        reference = last[0] if last else None
+        return SearchObservation(
+            title=reference.title if reference else "",
+            sanitized_url=reference.sanitized_url if reference else config.url,
+            result_count=len(rows),
+            table_count=1 if rows else 0,
+            row_count=len(rows),
+            columns=columns,
+            rows=tuple(rows),
+            row_links=tuple(links) if any(links) else (),
+            pagination_visible=False,
+            no_results=not rows,
+            errors=(),
+            session_expired=False,
+            result_zone_found=bool(rows),
+            period_report=tuple(outcome.describe() for outcome in outcomes),
+        )
+
+    def _execute_single_search(
         self,
         config: SessionConfig,
         criteria: Any,

@@ -225,6 +225,7 @@ class SidjilcomSessionManager:
         confirmed: bool,
         on_step: Any = None,
         on_pre_submit: Any = None,
+        split_periods: bool = False,
     ) -> Future[SearchObservation]:
         """Exécute une recherche uniquement après confirmation UI explicite."""
         future: Future[SearchObservation] = Future()
@@ -237,7 +238,7 @@ class SidjilcomSessionManager:
             future.set_exception(exc)
             return future
         return self._submit_operation(
-            "execute_search", criteria, on_step, on_pre_submit, require_connected=True
+            "execute_search", criteria, on_step, on_pre_submit, split_periods, require_connected=True
         )
 
     def select_autocomplete_suggestion(
@@ -398,10 +399,11 @@ class SidjilcomSessionManager:
             if command.name == "execute_search":
                 if self.snapshot.state != SessionState.CONNECTED:
                     raise SessionNotConnected()
-                criteria, on_step, on_pre_submit = command.arguments
+                criteria, on_step, on_pre_submit, split_periods = command.arguments
+                kwargs = {"split_periods": True} if split_periods else {}
                 result = browser.execute_search(
                     self.config, criteria, confirmed=True, on_step=on_step,
-                    on_pre_submit=on_pre_submit,
+                    on_pre_submit=on_pre_submit, **kwargs,
                 )
                 if not command.future.done():
                     command.future.set_result(result)
