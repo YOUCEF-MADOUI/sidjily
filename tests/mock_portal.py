@@ -375,7 +375,8 @@ def _pair(label: str, value: str) -> str:
 
 def detail_page_real(company: Company) -> str:
     """Fiche telle que l'affiche le portail réel : onglets et colonnes libellé | valeur."""
-    body = ('<div class="rech-nav-container"><ul class="nav nav-tabs"><li class="nav-item">'
+    body = ('<h2 class="hide-accessible-x">Navigation</h2>'
+            '<div class="rech-nav-container"><ul class="nav nav-tabs"><li class="nav-item">'
             '<a class="nav-link active" href="#tab_0">Société</a></li></ul></div>'
             '<div class="tab-content"><div id="tab_0" class="tab-pane active"><fieldset>'
             '<div class="tecket"><span>Information Société</span></div>'
@@ -392,7 +393,7 @@ def detail_page_real(company: Company) -> str:
               '<div class="col-md-3"><label>Date début expoiltation :</label></div>'
               '<div class="col-md-3"><label>16/06/2002</label></div></div>'
             + '</fieldset></div></div>')
-    return _page(company.name, body)
+    return _page("Sidjilcom - CNRC", body)
 
 
 def detail_page(company: Company) -> str:

@@ -1077,11 +1077,16 @@ class SidjilyApp:
                 f"Nombre de résultats affiché : {observation.result_count if observation.result_count is not None else 'non détecté'}",
                 f"Zone de résultat sémantique : {'oui' if observation.result_zone_found else 'non'}"
                 f"{f' ({observation.result_zone_tag})' if observation.result_zone_tag else ''}",
-                f"Tableaux visibles : {observation.table_count}",
-                f"Lignes du premier tableau : {observation.row_count}",
+                *(
+                    [f"Lignes collectées (toutes périodes, toutes pages) : {rows_stored}"]
+                    if observation.period_report else [
+                        f"Tableaux visibles : {observation.table_count}",
+                        f"Lignes du premier tableau : {observation.row_count}",
+                        f"Lignes collectées (page 1) : {rows_stored}",
+                        f"Pagination visible : {'oui' if observation.pagination_visible else 'non'}",
+                    ]
+                ),
                 "Colonnes : " + (" · ".join(columns) if columns else "aucune détectée"),
-                f"Lignes collectées (page 1) : {rows_stored}",
-                f"Pagination visible : {'oui' if observation.pagination_visible else 'non'}",
                 f"Message aucun résultat : {'oui' if observation.no_results else 'non'}",
                 "Erreurs : " + (" · ".join(observation.errors) if observation.errors else "aucune détectée"),
             ]

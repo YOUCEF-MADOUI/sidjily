@@ -1629,10 +1629,14 @@ class PlaywrightSearchDriver:
             for pair in raw.get("fields", [])[:200]
             if isinstance(pair, (list, tuple)) and len(pair) == 2
         ]
+        kept = [pair for pair in fields if pair[0] and pair[1]]
+        # La fiche réelle n'a pas de titre propre (le premier titre visible est « Navigation ») :
+        # la raison sociale sert de titre.
+        names = [value for label, value in kept if label.endswith("Raison Sociale / Nom commercial")]
         return {
             "url": token,
-            "title": clean_data_text(raw.get("title", ""), 200),
-            "fields": [pair for pair in fields if pair[0] and pair[1]],
+            "title": names[0] if names else clean_data_text(raw.get("title", ""), 200),
+            "fields": kept,
         }
 
     def navigate_next_page(self) -> bool:

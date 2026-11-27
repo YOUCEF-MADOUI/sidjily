@@ -90,6 +90,7 @@ class MockPortalEndToEndTests(unittest.TestCase):
         self.assertIn(["Local commercial — Adresse", "Zone d'activité, lot 7"], fields)
         self.assertFalse(any(label.endswith("Fax") for label, _value in fields))
         self.assertIn(["Information Société — NIF", "000340000000021"], details[1]["fields"])
+        self.assertEqual(details[0]["title"], "AUTHENTIQUE SOCIETE 01")
         # Une nouvelle recherche fonctionne après la lecture des fiches (navigateur hors formulaire).
         again = self.search({**BASE, "raison_sociale": "authentique"})
         self.assertEqual(again.result_count, 1)
