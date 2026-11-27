@@ -229,6 +229,8 @@ class SearchDriver(Protocol):
 
     def fill_select(self, control: SearchControl, value: str) -> None: ...
 
+    def fill_radio(self, control: SearchControl, value: str) -> None: ...
+
     def prepare_autocomplete(self, field_id: str, value: str) -> AutocompleteObservation: ...
 
     def select_autocomplete(self, token: str, index: int) -> AutocompleteSelectionResult: ...
@@ -444,6 +446,9 @@ class SearchExecutor:
                 expected_dom_values[item.criterion] = item.value
             elif item.component_type is ComponentType.SELECT:
                 self._driver.fill_select(control, item.value)
+                expected_dom_values[item.criterion] = item.value
+            elif item.component_type is ComponentType.RADIO:
+                self._driver.fill_radio(control, item.value)
                 expected_dom_values[item.criterion] = item.value
             else:
                 raise SearchCriteriaNotSupported()
@@ -696,6 +701,14 @@ class SearchExecutor:
         elif component_type is ComponentType.DATE:
             # Le type est accepté uniquement s'il est observé sur le contrôle réel.
             if control.tag_name != "input" or control.input_type != "date":
+                raise SearchCriteriaNotSupported()
+        elif component_type is ComponentType.RADIO:
+            if (
+                control.tag_name != "input"
+                or control.input_type != "radio"
+                or value not in mapping.options
+                or value not in control.option_labels
+            ):
                 raise SearchCriteriaNotSupported()
         elif component_type is ComponentType.SELECT:
             if (

@@ -159,6 +159,18 @@ class MockPortalEndToEndTests(unittest.TestCase):
             self.portal.state.autocomplete_init_delay_ms = 0
         self.assertEqual(observation.result_count, 23)
 
+    def test_radio_criteria_oui_and_actif_are_checked(self) -> None:
+        observation = self.search({**BASE, "conformite_rc": "Oui", "etat_commercant": "Actif"})
+        self.assertEqual(observation.result_count, 23)
+        self.assertEqual(self.portal.state.last_criteria[f"{NS}CRCE"], "1")
+        self.assertEqual(self.portal.state.last_criteria[f"{NS}etat_commercant"], "1")
+
+    def test_radio_criterion_with_unknown_label_is_refused_before_submission(self) -> None:
+        from sidjily.sidjilcom.criteria import CriteriaValidationError
+
+        with self.assertRaises(CriteriaValidationError):
+            criteria_from_mapping({**BASE, "etat_commercant": "Inconnu"})
+
     def test_select_criterion_is_submitted_by_label(self) -> None:
         observation = self.search({**BASE, "forme_juridique": "EURL"})
         self.assertEqual(observation.result_count, 12)

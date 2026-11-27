@@ -148,15 +148,26 @@ class SearchCriteriaModelTests(unittest.TestCase):
             {"mode": SearchMode.PERSONNE_MORALE.value, "qualite": "Gérant"},
             {"mode": SearchMode.PERSONNE_PHYSIQUE.value, "numero_inscription": {"nrc2": "x"}},
             {"mode": SearchMode.PERSONNE_MORALE.value, "presume": "Oui"},
-            {"mode": SearchMode.PERSONNE_PHYSIQUE.value, "conformite_rc": "Oui"},
-            {"mode": SearchMode.PERSONNE_MORALE.value, "etat_commercant": "Actif"},
         ):
             with self.subTest(payload=payload), self.assertRaisesRegex(CriteriaValidationError, "Options Sidjilcom non fournies"):
                 criteria_from_mapping(payload)
         for key in ("secteur_activite", "morale.forme_juridique", "morale.qualite",
-                    "numero_inscription.nrc2", "numero_inscription.nrc5", "conformite_rc", "etat_commercant"):
+                    "numero_inscription.nrc2", "numero_inscription.nrc5"):
             self.assertEqual(SIDJILCOM_CONTROL_MAP[key].options, ())
             self.assertIsNone(SIDJILCOM_CONTROL_MAP[key].option_count)
+
+    def test_radio_criteria_use_the_labels_observed_on_the_portal(self) -> None:
+        # Portail réel : Conformité RC « Oui / Non », État commerçant « Actif / Radié » (boutons radio).
+        self.assertEqual(SIDJILCOM_CONTROL_MAP["conformite_rc"].options, ("Oui", "Non"))
+        self.assertEqual(SIDJILCOM_CONTROL_MAP["etat_commercant"].options, ("Actif", "Radié"))
+        criteria_from_mapping({"mode": SearchMode.PERSONNE_PHYSIQUE.value, "conformite_rc": "Oui"})
+        criteria_from_mapping({"mode": SearchMode.PERSONNE_MORALE.value, "etat_commercant": "Actif"})
+        for payload in (
+            {"mode": SearchMode.PERSONNE_MORALE.value, "conformite_rc": "Conforme"},
+            {"mode": SearchMode.PERSONNE_MORALE.value, "etat_commercant": "actif"},
+        ):
+            with self.subTest(payload=payload), self.assertRaises(CriteriaValidationError):
+                criteria_from_mapping(payload)
 
     def test_incomplete_registration_number_is_allowed_but_semantics_block_automation(self) -> None:
         criteria = SearchCriteria(
@@ -206,12 +217,14 @@ class SearchCriteriaModelTests(unittest.TestCase):
         self.assertEqual(physical.modes, (SearchMode.PERSONNE_PHYSIQUE,))
         self.assertEqual(moral.modes, (SearchMode.PERSONNE_MORALE,))
         for key in ("secteur_activite", "morale.forme_juridique", "morale.qualite",
-                    "numero_inscription.nrc2", "numero_inscription.nrc5", "conformite_rc", "etat_commercant"):
+                    "numero_inscription.nrc2", "numero_inscription.nrc5"):
             control = SIDJILCOM_CONTROL_MAP[key]
             self.assertEqual(control.component_type, ComponentType.SELECT)
             self.assertIsNone(control.element_id)
             self.assertIsNone(control.option_count)
             self.assertEqual(control.options, ())
+        for key in ("conformite_rc", "etat_commercant"):
+            self.assertEqual(SIDJILCOM_CONTROL_MAP[key].component_type, ComponentType.RADIO)
 
     def test_suffix_resolution_requires_exactly_one_control_and_respects_mode(self) -> None:
         self.assertEqual(

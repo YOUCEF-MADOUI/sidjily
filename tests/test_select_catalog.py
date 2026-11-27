@@ -58,10 +58,10 @@ class ObservedControlsTests(unittest.TestCase):
         self.assertIs(SIDJILCOM_CONTROL_MAP["morale.raison_sociale"].component_type, ComponentType.TEXT)
 
     def test_reapplying_replaces_previous_capture(self) -> None:
-        apply_observed_controls({"etat_commercant": {"tag": "select", "options": ["Actif", "Radié"]}})
+        apply_observed_controls({"morale.qualite": {"tag": "select", "options": ["GERANT", "ASSOCIE"]}})
         apply_observed_controls({})
-        self.assertEqual(SIDJILCOM_CONTROL_MAP["etat_commercant"].options, ())
-        self.assertEqual(SELECT_OPTION_CATALOGS["etat_commercant"], ())
+        self.assertEqual(SIDJILCOM_CONTROL_MAP["morale.qualite"].options, ())
+        self.assertEqual(SELECT_OPTION_CATALOGS["morale.qualite"], ())
 
     def test_captured_select_value_is_validated_and_filled(self) -> None:
         with self.assertRaises(CriteriaValidationError):

@@ -1456,6 +1456,10 @@ class _NewSearchDialog:
             for key in set(self._COMMON_KEYS).union(*map(set, self._SPECIFIC_KEYS.values()))
         }
         self._number_variables = {f"nrc{index}": tk.StringVar() for index in range(1, 6)}
+        if initial_search is None:
+            # Par défaut, chaque recherche cible les commerçants conformes et actifs.
+            self._variables["conformite_rc"].set("Oui")
+            self._variables["etat_commercant"].set("Actif")
         self._watched: set[str] = set()
         self._advanced_visible = False
         self._restoring = False
@@ -1675,7 +1679,7 @@ class _NewSearchDialog:
         mapping = SIDJILCOM_CONTROL_MAP.get(path)
         if mapping is None:
             return "text"
-        if mapping.component_type is ComponentType.SELECT:
+        if mapping.component_type in (ComponentType.SELECT, ComponentType.RADIO):
             return "select" if mapping.options and mapping.input_semantics_confirmed else "select_unknown"
         if mapping.component_type is ComponentType.UNCONFIRMED or not mapping.input_semantics_confirmed:
             return "unconfirmed"

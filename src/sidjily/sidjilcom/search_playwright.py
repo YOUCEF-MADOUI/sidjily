@@ -614,6 +614,9 @@ class PlaywrightSearchDriver:
                     for item in criteria:
                         name = resolve_control_name(mode, item.criterion, names)
                         matches = [locator for locator, observed_name in named if observed_name == name]
+                        if SIDJILCOM_CONTROL_MAP[item.criterion].component_type is ComponentType.RADIO:
+                            selected_controls.append(self._radio_control(form, item.criterion, name, len(matches)))
+                            continue
                         if len(matches) != 1:
                             raise SearchFormUnsafe()
                         locator = matches[0]
@@ -1001,6 +1004,11 @@ class PlaywrightSearchDriver:
         # Relecture après remplissage : le contrôle n'est évidemment plus vide ici.
         if self.page_marker() != self._active_marker or control.handle is None:
             raise SearchFormUnsafe()
+        if control.input_type == "radio":
+            try:
+                return self._checked_radio_label(control.handle)
+            except Exception:
+                raise SearchFormUnsafe("La valeur du contrôle n'a pas pu être vérifiée dans le DOM.", code="dom_value_unreadable") from None
         try:
             if not control.handle.is_visible() or not control.handle.is_enabled():
                 raise SearchFormUnsafe()
@@ -1165,6 +1173,72 @@ class PlaywrightSearchDriver:
         except Exception:
             raise SearchFormUnsafe() from None
 
+    _RADIO_LABELS_SCRIPT = """elements => elements.map(element => {
+        const label = (element.labels && element.labels.length) ? element.labels[0] : element.parentElement;
+        return {
+            label: String((label && (label.innerText || label.textContent)) || '').replace(/\\s+/g, ' ').trim(),
+            checked: !!element.checked,
+            visible: element.getClientRects().length > 0,
+            enabled: !element.disabled,
+        };
+    })"""
+
+    def _radio_states(self, group: Any) -> list[dict[str, object]]:
+        states = group.evaluate_all(self._RADIO_LABELS_SCRIPT)
+        return [item for item in states if isinstance(item, dict)] if isinstance(states, list) else []
+
+    def _radio_control(self, form: Any, criterion: str, name: str, count: int) -> SearchControl:
+        """Groupe de boutons radio (portail réel : Conformité RC, État commerçant)."""
+        group = form.locator(f'input[type="radio"][name="{name}"]')
+        states = self._radio_states(group)
+        labels = tuple(str(item.get("label", "")) for item in states)
+        if count < 2 or len(states) != count or len(set(labels)) != len(labels) or not all(labels):
+            raise SearchFormUnsafe()
+        return SearchControl(
+            criterion=criterion,
+            name=name,
+            tag_name="input",
+            input_type="radio",
+            enabled=all(bool(item.get("enabled")) for item in states),
+            visible=all(bool(item.get("visible")) for item in states),
+            empty=not any(bool(item.get("checked")) for item in states),
+            class_names=(),
+            aria_autocomplete=None,
+            option_labels=labels,
+            element_id=None,
+            label=SIDJILCOM_CONTROL_MAP[criterion].label,
+            role="radiogroup",
+            required=False,
+            handle=group,
+        )
+
+    def _checked_radio_label(self, group: Any) -> str:
+        checked = [str(item.get("label", "")) for item in self._radio_states(group) if item.get("checked")]
+        return checked[0] if len(checked) == 1 else ""
+
+    def fill_radio(self, control: SearchControl, value: str) -> None:
+        if (
+            self.page_marker() != self._active_marker
+            or control.handle is None
+            or control.input_type != "radio"
+        ):
+            raise SearchFormUnsafe()
+        try:
+            states = self._radio_states(control.handle)
+            labels = [str(item.get("label", "")) for item in states]
+            if labels.count(value) != 1 or any(item.get("checked") for item in states):
+                raise SearchFormUnsafe()
+            target = control.handle.nth(labels.index(value))
+            if not target.is_visible() or not target.is_enabled():
+                raise SearchFormUnsafe()
+            target.check(timeout=self._timeout_ms)
+            if self._checked_radio_label(control.handle) != value:
+                raise SearchFormUnsafe()
+        except SearchExecutionError:
+            raise
+        except Exception:
+            raise SearchFormUnsafe() from None
+
     def fill_select(self, control: SearchControl, value: str) -> None:
         locator = self._require_control(control, "select", "select-one")
         try:
@@ -1294,7 +1368,13 @@ class PlaywrightSearchDriver:
                     live_fields.append(field_info)
             if live_fields:
                 self._last_diagnostic["fields"] = live_fields
+            radio_names = {control.name for control in form.controls if control.input_type == "radio"}
             for name, expected in form.verified_values:
+                if name in radio_names:
+                    group = self._active_form.locator(f'input[type="radio"][name="{name}"]')
+                    if self._checked_radio_label(group).strip() != expected.strip():
+                        raise SearchFormUnsafe("Une valeur de critère a changé juste avant le clic.", code="last_moment_value_mismatch")
+                    continue
                 matching = self._active_form.locator("input[name], select[name], textarea[name]")
                 values = []
                 for index in range(min(matching.count(), 250)):

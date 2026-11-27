@@ -23,6 +23,7 @@ class ComponentType(str, Enum):
     TEXT = "text"
     AUTOCOMPLETE = "autocomplete"
     SELECT = "select"
+    RADIO = "radio"
     DATE = "date"
     UNCONFIRMED = "unconfirmed"
 
@@ -187,13 +188,14 @@ SIDJILCOM_CONTROL_MAP: dict[str, ControlMapping] = {
         "date_inscription_au", "Date d'inscription — Au", "_fin_immat",
         component_type=ComponentType.DATE,
     ),
+    # Portail réel : boutons radio « Oui / Non » et « Actif / Radié » (même nom pour les deux choix).
     "conformite_rc": _control(
-        "conformite_rc", "Conformité RC", "_CRCE", html_type="select",
-        component_type=ComponentType.SELECT,
+        "conformite_rc", "Conformité RC", "_CRCE", html_type="radio",
+        component_type=ComponentType.RADIO, options=("Oui", "Non"), option_count=2,
     ),
     "etat_commercant": _control(
-        "etat_commercant", "État commerçant", "_etat_commercant", html_type="select",
-        component_type=ComponentType.SELECT,
+        "etat_commercant", "État commerçant", "_etat_commercant", html_type="radio",
+        component_type=ComponentType.RADIO, options=("Actif", "Radié"), option_count=2,
     ),
     "physique.nom": _control(
         "physique.nom", "Nom", "_nom", (SearchMode.PERSONNE_PHYSIQUE,),
@@ -266,7 +268,7 @@ REPORTED_UNCLASSIFIED_CONTROL_COUNTS: dict[SearchMode, int] = {
 SELECT_OPTION_CATALOGS: dict[str, tuple[str, ...]] = {
     key: mapping.options
     for key, mapping in SIDJILCOM_CONTROL_MAP.items()
-    if mapping.component_type is ComponentType.SELECT
+    if mapping.component_type in (ComponentType.SELECT, ComponentType.RADIO)
 }
 
 _BASE_CONTROL_MAP: dict[str, ControlMapping] = dict(SIDJILCOM_CONTROL_MAP)
@@ -335,7 +337,7 @@ def reset_observed_controls() -> None:
     SELECT_OPTION_CATALOGS.update({
         key: mapping.options
         for key, mapping in _BASE_CONTROL_MAP.items()
-        if mapping.component_type is ComponentType.SELECT
+        if mapping.component_type in (ComponentType.SELECT, ComponentType.RADIO)
     })
 
 
@@ -593,10 +595,10 @@ def resolve_control_name(mode: SearchMode, criterion: str, observed_names: tuple
     mapping = SIDJILCOM_CONTROL_MAP.get(criterion)
     if mapping is None or mode not in mapping.modes or not mapping.name_suffix:
         raise ControlMappingError("Mapping du contrôle absent pour ce mode.")
-    matches = [
+    matches = list(dict.fromkeys(
         name for name in observed_names
         if isinstance(name, str) and name.casefold().endswith(mapping.name_suffix.casefold())
-    ]
+    ))
     if not matches:
         raise ControlMappingError("Aucun nom DOM ne correspond au suffixe confirmé.")
     if len(matches) != 1:
