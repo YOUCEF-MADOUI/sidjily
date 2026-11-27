@@ -220,7 +220,7 @@ class TaskManagerTests(unittest.TestCase):
 
     def test_portal_refusal_over_300_results_is_a_known_outcome(self) -> None:
         search = self.manager.create_controlled_search(
-            "Trop large", {"mode": "PERSONNE_PHYSIQUE", "activite": "442102", "commune_wilaya": "34000"}
+            "Trop large", {"mode": "PERSONNE_MORALE", "commune_wilaya": "16000"}
         )
         self.manager.start_controlled_search(search.id)
         for step in ("submitting", "submitted", "observing_results"):

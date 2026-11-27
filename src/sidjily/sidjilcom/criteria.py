@@ -389,6 +389,27 @@ def _check_select_value(criterion: str, value: str | None) -> None:
         raise CriteriaValidationError(f"Valeur enum invalide pour {criterion}.")
 
 
+IMPORT_SECTOR_LABEL = "Importation Pour La Revente En L'Etat"
+IMPORT_FORBIDDEN_FOR_NATURAL_PERSONS = (
+    "La législation algérienne interdit l'importation aux personnes physiques : une recherche "
+    "« Personne physique » sur une activité d'importation ne renvoie rien. Choisissez « Personne morale »."
+)
+
+
+def is_import_activity(activite: str | None, secteur: str | None = None) -> bool:
+    """Activité d'importation : code de la nomenclature commençant par 4 (secteur 4, « Importation
+    pour la revente en l'état »), libellé « IMPORTATION … » ou secteur Importation choisi."""
+    if secteur and secteur.strip().casefold() == IMPORT_SECTOR_LABEL.casefold():
+        return True
+    if not activite:
+        return False
+    text = activite.strip()
+    code = re.match(r"^(\d{6})\b", text)
+    if code and code.group(1).startswith("4"):
+        return True
+    return bool(re.search(r"\bIMPORTATION\b", text, re.I))
+
+
 def validate_search_criteria(criteria: SearchCriteria) -> SearchCriteria:
     """Valide localement un modèle; les critères vides restent autorisés."""
     if not isinstance(criteria, SearchCriteria) or not isinstance(criteria.mode, SearchMode):
@@ -402,6 +423,9 @@ def validate_search_criteria(criteria: SearchCriteria) -> SearchCriteria:
             criteria.physique if criteria.physique is not None else PersonnePhysiqueCriteria()
         )
         specific_prefix = "physique"
+        common = criteria.common if isinstance(criteria.common, CommonSearchCriteria) else None
+        if common is not None and is_import_activity(common.activite, common.secteur_activite):
+            raise CriteriaValidationError(IMPORT_FORBIDDEN_FOR_NATURAL_PERSONS)
     else:
         if criteria.physique is not None or (
             criteria.morale is not None and not isinstance(criteria.morale, PersonneMoraleCriteria)

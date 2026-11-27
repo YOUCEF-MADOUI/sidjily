@@ -156,6 +156,22 @@ class SearchCriteriaModelTests(unittest.TestCase):
             self.assertEqual(SIDJILCOM_CONTROL_MAP[key].options, ())
             self.assertIsNone(SIDJILCOM_CONTROL_MAP[key].option_count)
 
+    def test_import_activity_is_refused_for_natural_persons(self) -> None:
+        from sidjily.sidjilcom.criteria import is_import_activity
+
+        for payload in (
+            {"mode": "PERSONNE_PHYSIQUE", "activite": "442102"},
+            {"mode": "PERSONNE_PHYSIQUE", "activite": "442102 : IMPORTATION DE PIECES DETACHEES"},
+            {"mode": "PERSONNE_PHYSIQUE", "activite": "importation de fruits"},
+        ):
+            with self.subTest(payload=payload), self.assertRaisesRegex(CriteriaValidationError, "personnes physiques"):
+                criteria_from_mapping(payload)
+        # Même activité en personne morale, ou activité de détail en personne physique : autorisé.
+        criteria_from_mapping({"mode": "PERSONNE_MORALE", "activite": "442102"})
+        criteria_from_mapping({"mode": "PERSONNE_PHYSIQUE", "activite": "552101"})
+        self.assertTrue(is_import_activity(None, "Importation Pour La Revente En L'Etat"))
+        self.assertFalse(is_import_activity("612345 : SERVICES", "Services"))
+
     def test_radio_criteria_use_the_labels_observed_on_the_portal(self) -> None:
         # Portail réel : Conformité RC « Oui / Non », État commerçant « Actif / Radié » (boutons radio).
         self.assertEqual(SIDJILCOM_CONTROL_MAP["conformite_rc"].options, ("Oui", "Non"))

@@ -660,7 +660,7 @@ class SearchExecutorTests(unittest.TestCase):
                 "raison_sociale": "Test",
             }),
             criteria_from_mapping({
-                "mode": "PERSONNE_PHYSIQUE", "activite": "442102", "commune_wilaya": "34000",
+                "mode": "PERSONNE_PHYSIQUE", "activite": "552101", "commune_wilaya": "34000",
             }),
             criteria_from_mapping({
                 "mode": "PERSONNE_MORALE", "activite": "442103", "commune_wilaya": "34000",
