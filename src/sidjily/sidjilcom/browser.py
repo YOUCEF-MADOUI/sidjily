@@ -1329,6 +1329,15 @@ class PlaywrightBrowser:
         )
         return driver.observe_results()
 
+    def navigate_next_page(self, config: SessionConfig) -> bool:
+        if self._page is None or self._page.is_closed():
+            return False
+        driver = PlaywrightSearchDriver(
+            self._page, config.url, lambda _mode: None, self._autocomplete_tester,
+            timeout_ms=config.navigation_timeout_ms,
+        )
+        return driver.navigate_next_page()
+
     def prepare_autocomplete_test(
         self, config: SessionConfig, field_id: str, query: str
     ) -> AutocompleteObservation:

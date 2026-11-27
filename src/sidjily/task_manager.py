@@ -44,7 +44,6 @@ def _safe_failure_diagnostic(diagnostic: dict[str, Any]) -> dict[str, Any]:
         except (TypeError, ValueError):
             return ""
 
-    allowed_criteria = {"activite", "commune_wilaya"}
     fields: list[dict[str, Any]] = []
     candidate_fields = diagnostic.get("fields", diagnostic.get("controls", []))
     forms = diagnostic.get("forms", [])
@@ -52,9 +51,6 @@ def _safe_failure_diagnostic(diagnostic: dict[str, Any]) -> dict[str, Any]:
         candidate_fields = forms[0].get("fields", []) if isinstance(forms[0], dict) else []
     for control in candidate_fields[:20] if isinstance(candidate_fields, list) else []:
         if not isinstance(control, dict):
-            continue
-        criterion = control.get("criterion")
-        if criterion not in allowed_criteria and criterion is not None:
             continue
         item: dict[str, Any] = {
             key: safe_text(control.get(key), 180)
@@ -100,14 +96,14 @@ def _safe_failure_diagnostic(diagnostic: dict[str, Any]) -> dict[str, Any]:
             "title": safe_text(page.get("title", ""), 160),
             "section": safe_text(page.get("section", ""), 80),
         }
-    expected = [
-        {"criterion": item, "suffix": suffix}
-        for item, suffix in (("activite", "_activi"), ("commune_wilaya", "_wilcom"))
-        if any(
-            isinstance(entry, dict) and entry.get("criterion") == item
-            for entry in diagnostic.get("expected_fields", [])
-        )
-    ]
+    expected = []
+    for entry in diagnostic.get("expected_fields", []):
+        if isinstance(entry, dict) and isinstance(entry.get("criterion"), str):
+            expected.append({
+                "criterion": safe_text(entry["criterion"], 80),
+                "suffix": safe_text(entry.get("suffix", ""), 30),
+            })
+    expected = expected[:20]
     safe_candidate_forms: list[dict[str, Any]] = []
     if isinstance(forms, list):
         for candidate in forms[:10]:
@@ -139,7 +135,7 @@ def _safe_failure_diagnostic(diagnostic: dict[str, Any]) -> dict[str, Any]:
     safe: dict[str, Any] = {
         "kind": "sidjilcom_controlled_search_failure",
         "stage": safe_text(diagnostic.get("stage", ""), 80),
-        "mode": "PERSONNE_MORALE" if diagnostic.get("mode") == "PERSONNE_MORALE" else "",
+        "mode": safe_text(diagnostic.get("mode", ""), 30),
         "reason_code": safe_text(diagnostic.get("reason_code", "search_stopped"), 80),
         "current_field": safe_text(diagnostic.get("current_field", ""), 80),
         "expected_fields": expected,
@@ -628,10 +624,9 @@ class TaskManager:
             raise ValueError("Un diagnostic préalable ne peut pas contenir de secrets.")
         controls = diagnostic.get("controls", [])
         criteria = diagnostic.get("criteria", [])
-        allowed_criteria = {"activite", "commune_wilaya"}
         if not isinstance(controls, list) or not isinstance(criteria, list):
             raise ValueError("Contrôles du diagnostic préalable invalides.")
-        if any(not isinstance(item, str) or item not in allowed_criteria for item in criteria):
+        if any(not isinstance(item, str) for item in criteria):
             raise ValueError("Critères du diagnostic préalable invalides.")
         sanitized = _safe_failure_diagnostic({
             **diagnostic,
@@ -641,7 +636,7 @@ class TaskManager:
         })
         safe_controls = []
         for control in controls:
-            if not isinstance(control, dict) or control.get("criterion") not in allowed_criteria:
+            if not isinstance(control, dict) or not isinstance(control.get("criterion"), str):
                 raise ValueError("Critère de contrôle préalable non autorisé.")
             safe_control = dict(control)
             if isinstance(control.get("classes"), list):
@@ -826,6 +821,65 @@ class TaskManager:
                 "Diagnostic structurel ultérieur enregistré en lecture seule; aucune nouvelle recherche soumise.",
                 search_id=search_id, task_id=row["task_id"],
             )
+
+    def store_search_results(
+        self,
+        search_id: str,
+        columns: tuple[str, ...],
+        rows: tuple[tuple[str, ...], ...],
+        *,
+        page: int = 1,
+    ) -> int:
+        now = utc_now()
+        stored = 0
+        with self.database.connection(immediate=True) as connection:
+            search = connection.execute("SELECT id FROM searches WHERE id = ?", (search_id,)).fetchone()
+            if search is None:
+                raise KeyError(f"Recherche introuvable : {search_id}")
+            task = connection.execute(
+                "SELECT id FROM tasks WHERE search_id = ? AND task_type = 'sidjilcom_controlled_search'",
+                (search_id,),
+            ).fetchone()
+            task_id = task["id"] if task else None
+            for row_index, row in enumerate(rows):
+                dedupe_key = f"p{page}_r{row_index}"
+                payload = {
+                    "columns": list(columns),
+                    "values": list(row),
+                    "page": page,
+                    "row_index": row_index,
+                }
+                try:
+                    cursor = connection.execute(
+                        "INSERT OR IGNORE INTO results(id, search_id, source_task_id, dedupe_key, payload_json, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (str(uuid.uuid4()), search_id, task_id, dedupe_key, self.database.encode_json(payload), now),
+                    )
+                    stored += cursor.rowcount
+                except sqlite3.IntegrityError:
+                    pass
+            if stored:
+                self.database.add_event(
+                    connection,
+                    f"{stored} ligne(s) de résultats collectée(s) (page {page}).",
+                    search_id=search_id, task_id=task_id,
+                )
+        return stored
+
+    def get_search_results(self, search_id: str) -> list[dict[str, Any]]:
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                "SELECT payload_json, created_at FROM results WHERE search_id = ? ORDER BY dedupe_key",
+                (search_id,),
+            ).fetchall()
+        return [{"created_at": row["created_at"], **json.loads(row["payload_json"])} for row in rows]
+
+    def get_search_result_count(self, search_id: str) -> int:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS cnt FROM results WHERE search_id = ?", (search_id,)
+            ).fetchone()
+        return row["cnt"] if row else 0
 
     def get_search(self, search_id: str) -> Search:
         with self.database.connection() as connection:

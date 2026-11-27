@@ -476,5 +476,29 @@ class TaskManagerTests(unittest.TestCase):
         self.assertEqual(tuple(preserved), ("legacy-id", "created", None))
 
 
+    def test_store_and_retrieve_search_results(self) -> None:
+        search = self.manager.create_controlled_search("Collecte", {"mode": "PERSONNE_MORALE"})
+        task = self.manager.start_controlled_search(search.id)
+        self.manager.complete_controlled_search(search.id, {
+            "title": "Résultats",
+            "url": "https://sidjilcom.cnrc.dz/fr/group/sidjilcom/repertoire-des-commercants",
+            "result_count": 2, "no_results": False, "table_count": 1, "row_count": 2,
+            "columns": ["Dénomination", "Wilaya"], "company_rows_collected": True,
+        })
+        columns = ("Dénomination", "Wilaya")
+        rows = (("SARL ABC", "Alger"), ("EURL DEF", "Oran"))
+        stored = self.manager.store_search_results(search.id, columns, rows, page=1)
+        self.assertEqual(stored, 2)
+        self.assertEqual(self.manager.get_search_result_count(search.id), 2)
+        results = self.manager.get_search_results(search.id)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["columns"], ["Dénomination", "Wilaya"])
+        self.assertEqual(results[0]["values"], ["SARL ABC", "Alger"])
+        self.assertEqual(results[1]["values"], ["EURL DEF", "Oran"])
+        duplicate = self.manager.store_search_results(search.id, columns, rows, page=1)
+        self.assertEqual(duplicate, 0)
+        self.assertEqual(self.manager.get_search_result_count(search.id), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

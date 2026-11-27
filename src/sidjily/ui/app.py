@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
@@ -287,6 +289,10 @@ class SidjilyApp:
             report_toolbar, text="Enregistrer le diagnostic", command=self._save_diagnostic, state="disabled"
         )
         self.save_diagnostic_button.pack(side="left", padx=8)
+        self.export_csv_button = ttk.Button(
+            report_toolbar, text="Exporter CSV", command=self._export_csv, state="disabled"
+        )
+        self.export_csv_button.pack(side="left", padx=8)
         report_frame = ttk.Frame(parent)
         report_frame.pack(fill="x")
         self.diagnostic_text = tk.Text(
@@ -447,7 +453,7 @@ class SidjilyApp:
         self._pending_search_id = search.id
         self._pending_search_operation = future
         self.footer.configure(
-            text="Recherche contrôlée en cours. Un seul clic Rechercher est autorisé; aucun détail, collecte, pagination automatique ou export."
+            text="Recherche contrôlée en cours. Un seul clic Rechercher est autorisé; les résultats seront collectés après soumission."
         )
         self.refresh()
         self._refresh_session_status()
@@ -633,6 +639,13 @@ class SidjilyApp:
         state = "normal" if report else "disabled"
         self.copy_diagnostic_button.configure(state=state)
         self.save_diagnostic_button.configure(state=state)
+        csv_state = "disabled"
+        if self.selected_search_id:
+            try:
+                csv_state = "normal" if self.manager.get_search_result_count(self.selected_search_id) > 0 else "disabled"
+            except Exception:
+                pass
+        self.export_csv_button.configure(state=csv_state)
 
     def _copy_diagnostic(self) -> None:
         if not self._diagnostic_report:
@@ -661,6 +674,34 @@ class SidjilyApp:
             messagebox.showerror("Enregistrement impossible", str(exc), parent=self.root)
             return
         self.diagnostic_output.configure(text=f"Diagnostic enregistré : {destination}")
+
+    def _export_csv(self) -> None:
+        if not self.selected_search_id:
+            return
+        results = self.manager.get_search_results(self.selected_search_id)
+        if not results:
+            messagebox.showinfo("Export CSV", "Aucun résultat collecté pour cette recherche.", parent=self.root)
+            return
+        columns = results[0].get("columns", [])
+        destination = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Exporter les résultats en CSV",
+            defaultextension=".csv",
+            initialfile=f"sidjily-{self.selected_search_id[:8]}.csv",
+            filetypes=(("Fichier CSV", "*.csv"), ("Tous les fichiers", "*.*")),
+        )
+        if not destination:
+            return
+        try:
+            with open(destination, "w", encoding="utf-8-sig", newline="") as csv_file:
+                writer = csv.writer(csv_file)
+                writer.writerow(columns)
+                for result in results:
+                    writer.writerow(result.get("values", []))
+        except OSError as exc:
+            messagebox.showerror("Export impossible", str(exc), parent=self.root)
+            return
+        self.diagnostic_output.configure(text=f"CSV exporté ({len(results)} lignes) : {destination}")
 
     def _request_session_operation(self, future: Any, label: str) -> None:
         if self._pending_session_operation is not None and not self._pending_session_operation.done():
@@ -827,8 +868,34 @@ class SidjilyApp:
         else:
             summary = observation.to_mapping()
             self.manager.complete_controlled_search(search_id, summary)
+            rows_stored = 0
+            columns = observation.columns
+            if observation.rows and columns:
+                rows_stored = self.manager.store_search_results(
+                    search_id, columns, observation.rows, page=1,
+                )
+            pages_collected = 1
+            if observation.pagination_visible and rows_stored > 0:
+                max_pages = 50
+                for page_num in range(2, max_pages + 1):
+                    try:
+                        navigated = self.session.navigate_next_page().result(timeout=15)
+                        if not navigated:
+                            break
+                        page_obs = self.session.diagnose_search_results().result(timeout=10)
+                        if page_obs.session_expired or not page_obs.rows:
+                            break
+                        page_stored = self.manager.store_search_results(
+                            search_id, columns, page_obs.rows, page=page_num,
+                        )
+                        rows_stored += page_stored
+                        pages_collected = page_num
+                        if not page_obs.pagination_visible or page_stored == 0:
+                            break
+                    except Exception:
+                        break
             report = [
-                "RAPPORT STRUCTUREL — PREMIÈRE RECHERCHE SIDJILCOM",
+                "RAPPORT — RECHERCHE SIDJILCOM",
                 f"ID : {search_id}",
                 f"Étape : {self.manager.get_search(search_id).step}",
                 f"Titre : {observation.title or '—'}",
@@ -838,18 +905,15 @@ class SidjilyApp:
                 f"{f' ({observation.result_zone_tag})' if observation.result_zone_tag else ''}",
                 f"Tableaux visibles : {observation.table_count}",
                 f"Lignes du premier tableau : {observation.row_count}",
-                "Colonnes : " + (" · ".join(observation.columns) if observation.columns else "aucune détectée"),
+                "Colonnes : " + (" · ".join(columns) if columns else "aucune détectée"),
+                f"Lignes collectées : {rows_stored} (sur {pages_collected} page(s))",
                 f"Pagination visible : {'oui' if observation.pagination_visible else 'non'}",
                 f"Message aucun résultat : {'oui' if observation.no_results else 'non'}",
                 "Erreurs : " + (" · ".join(observation.errors) if observation.errors else "aucune détectée"),
-                "Détails d'entreprise ouverts : non",
-                "Lignes d'entreprise collectées : non",
-                "Pagination automatique / export : non",
-                "TEST RÉEL : effectué par l'utilisateur dans SIDJILY, pas par Arena.",
-                "TEST RÉEL : NON EFFECTUÉ PAR ARENA (aucune session réelle disponible pendant la validation Arena).",
             ]
             self._set_diagnostic_report("\n".join(report))
-            self.diagnostic_output.configure(text="Recherche terminée; seul le diagnostic structurel a été conservé.")
+            status_text = f"Recherche terminée; {rows_stored} ligne(s) collectée(s) sur {pages_collected} page(s)." if rows_stored else "Recherche terminée; aucune ligne collectée."
+            self.diagnostic_output.configure(text=status_text)
         self.refresh()
         self._refresh_session_status()
 
@@ -1048,7 +1112,7 @@ class _NewSearchDialog:
         self.launch_confirmed = False
         self.window = tk.Toplevel(parent)
         self.window.title(
-            "Première recherche réelle — confirmation requise"
+            "Recherche réelle — confirmation requise"
             if launch_mode else "Préparer une recherche"
         )
         self.window.transient(parent)
@@ -1059,7 +1123,7 @@ class _NewSearchDialog:
         self.name = tk.StringVar(
             value=(
                 initial_search.name if initial_search is not None
-                else "Test réel contrôlé — 442102 / 34000" if launch_mode
+                else "Recherche contrôlée" if launch_mode
                 else "Nouvelle recherche"
             )
         )
@@ -1181,8 +1245,7 @@ class _NewSearchDialog:
         self.mode.trace_add("write", self._on_mode_change)
         self._load_initial_values(initial_search)
         if launch_mode and initial_search is None:
-            self._variables["commune_wilaya"].set("34000")
-            self._variables["activite"].set("442102")
+            pass
         if self.mode.get():
             self._render_mode_fields()
         self.window.bind("<Return>", lambda _event: self._prepare_preview())
@@ -1383,15 +1446,21 @@ class _NewSearchDialog:
                 messagebox.showwarning("Critères invalides", str(exc), parent=self.window)
             return
         launch_allowed = True
+        launch_hint = ""
         try:
             validate_first_controlled_search(criteria)
-        except SearchExecutionError:
+        except SearchExecutionError as exc:
             launch_allowed = False
-        preview_text += (
-            "\n\nLancement réel autorisé uniquement pour Personne morale, "
-            "Activité = 442102 et Commune/Wilaya = 34000. "
-            "Toute soumission exige une confirmation explicite."
-        )
+            launch_hint = str(exc)
+        if launch_allowed:
+            preview_text += (
+                "\n\nLancement réel autorisé. "
+                "Toute soumission exige une confirmation explicite."
+            )
+        else:
+            preview_text += (
+                f"\n\nLancement non autorisé : {launch_hint}"
+            )
         self.count_label.configure(text=f"Critères renseignés : {count_filled_criteria(criteria)}")
         self._set_preview(preview_text)
         if self.launch_mode and not launch_allowed:
@@ -1460,8 +1529,8 @@ class _NewSearchDialog:
             "RÉCAPITULATIF\n\n"
             f"Nom : {name}\n{summary}\n\n"
             "En choisissant Oui, vous autorisez SIDJILY à utiliser le formulaire visible, "
-            "à sélectionner la suggestion exacte puis à cliquer une seule fois sur le vrai bouton Rechercher. "
-            "Aucun détail d'entreprise ne sera ouvert; aucune pagination, collecte ou export automatique.\n\n"
+            "à sélectionner les suggestions exactes puis à cliquer une seule fois sur le vrai bouton Rechercher. "
+            "Les résultats structurels seront collectés et pourront être exportés.\n\n"
             "Lancer cette recherche réelle maintenant ?",
             parent=self.window,
         )

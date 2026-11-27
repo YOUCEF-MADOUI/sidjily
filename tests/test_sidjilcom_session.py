@@ -453,7 +453,7 @@ class SessionManagerTests(unittest.TestCase):
             self.assertEqual(browser.real_search_calls, 0)
             manager.close()
 
-    def test_real_search_requires_confirmation_and_first_scenario_policy(self) -> None:
+    def test_real_search_requires_confirmation_and_validates_criteria(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             browser = FakeBrowser(PageEvidence(True, False, True, False, True))
             manager = self.make_manager(browser, temp_dir)
@@ -469,9 +469,9 @@ class SessionManagerTests(unittest.TestCase):
                 manager.execute_search(criteria, confirmed=False).result(timeout=1)
             self.assertEqual(browser.real_search_calls, 0)
 
-            wrong_scope = criteria_from_mapping({"mode": "PERSONNE_PHYSIQUE", "nom": "Test"})
+            empty = criteria_from_mapping({"mode": "PERSONNE_MORALE"})
             with self.assertRaises(SearchExecutionError):
-                manager.execute_search(wrong_scope, confirmed=True).result(timeout=1)
+                manager.execute_search(empty, confirmed=True).result(timeout=1)
             self.assertEqual(browser.real_search_calls, 0)
 
             result = manager.execute_search(criteria, confirmed=True).result(timeout=1)

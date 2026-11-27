@@ -156,6 +156,7 @@ class SearchObservation:
     no_results: bool
     errors: tuple[str, ...]
     session_expired: bool
+    rows: tuple[tuple[str, ...], ...] = ()
     result_zone_found: bool = False
     result_zone_tag: str = ""
 
@@ -185,9 +186,10 @@ class SearchObservation:
             "session_expired": self.session_expired,
             "result_zone_found": self.result_zone_found,
             "result_zone_tag": self.result_zone_tag,
+            "rows_collected": len(self.rows),
             "details_opened": False,
             "automatic_pagination": False,
-            "company_rows_collected": False,
+            "company_rows_collected": bool(self.rows),
         }
 
 
@@ -221,6 +223,8 @@ class SearchDriver(Protocol):
     ) -> None: ...
 
     def observe_results(self) -> SearchObservation: ...
+
+    def navigate_next_page(self) -> bool: ...
 
 
 def _normalized_suggestion(value: str) -> str:
@@ -737,20 +741,38 @@ class SearchExecutor:
 
 
 def validate_first_controlled_search(criteria: SearchCriteria) -> None:
-    """Autorise uniquement le test initial personne morale : activité 442102 + commune/wilaya 34000."""
+    """Valide les critères d'une recherche contrôlée avant soumission.
+
+    Accepte toute combinaison valide avec au moins un critère renseigné et dont
+    tous les champs utilisent un type de composant confirmé (TEXT, AUTOCOMPLETE, DATE).
+    Les SELECT dont les options ne sont pas connues restent interdits.
+    """
     try:
         validate_search_criteria(criteria)
         mapped = map_criteria_to_controls(criteria)
     except (CriteriaValidationError, AttributeError, TypeError):
         raise SearchCriteriaNotSupported() from None
-    expected = {"activite": "442102", "commune_wilaya": "34000"}
-    actual = {item.criterion: item.value for item in mapped}
-    if (
-        criteria.mode is not SearchMode.PERSONNE_MORALE
-        or len(mapped) != len(expected)
-        or actual != expected
-    ):
+    if not mapped:
         raise SearchExecutionError(
-            "Le premier test contrôlé exige Personne morale, Activité = 442102 et Commune/Wilaya = 34000 uniquement.",
-            code="outside_first_search_scope",
+            "Au moins un critère de recherche doit être renseigné.",
+            code="no_criteria",
         )
+    for item in mapped:
+        mapping = SIDJILCOM_CONTROL_MAP.get(item.criterion)
+        if mapping is None:
+            raise SearchCriteriaNotSupported()
+        if not mapping.input_semantics_confirmed:
+            raise SearchExecutionError(
+                f"Le champ {item.label} n'a pas été confirmé pour la saisie automatique.",
+                code="unconfirmed_field",
+            )
+        if mapping.component_type is ComponentType.SELECT and not mapping.options:
+            raise SearchExecutionError(
+                f"Les options du champ {item.label} ne sont pas connues; ce critère ne peut pas être utilisé.",
+                code="select_options_unknown",
+            )
+        if mapping.component_type is ComponentType.UNCONFIRMED:
+            raise SearchExecutionError(
+                f"Le champ {item.label} n'est pas automatisable.",
+                code="unconfirmed_field",
+            )

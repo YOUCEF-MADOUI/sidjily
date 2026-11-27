@@ -233,6 +233,9 @@ class FakeSearchDriver:
             raise RuntimeError("simulated observation interruption")
         return self.result
 
+    def navigate_next_page(self) -> bool:
+        return False
+
 
 class SearchExecutorTests(unittest.TestCase):
     def test_first_real_search_is_exactly_personne_morale_activity_and_joint_commune_wilaya(self) -> None:
@@ -610,12 +613,11 @@ class SearchExecutorTests(unittest.TestCase):
             SearchExecutor(driver).execute(criteria, confirmed=True)
         self.assertEqual(driver.submissions, 1)
 
-    def test_first_search_policy_accepts_only_exact_personne_morale_pair(self) -> None:
-        allowed = criteria_from_mapping({
-            "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000"
-        })
-        validate_first_controlled_search(allowed)
-        outside_scope = (
+    def test_first_search_policy_accepts_any_valid_criteria(self) -> None:
+        valid_cases = (
+            criteria_from_mapping({
+                "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000"
+            }),
             criteria_from_mapping({
                 "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000",
                 "raison_sociale": "Test",
@@ -624,17 +626,18 @@ class SearchExecutorTests(unittest.TestCase):
                 "mode": "PERSONNE_PHYSIQUE", "activite": "442102", "commune_wilaya": "34000",
             }),
             criteria_from_mapping({
-                "mode": "PERSONNE_MORALE", "activite": "442102", "commune_wilaya": "34000 : BORDJ BOU ARRERIDJ",
-            }),
-            criteria_from_mapping({
                 "mode": "PERSONNE_MORALE", "activite": "442103", "commune_wilaya": "34000",
             }),
             criteria_from_mapping({"mode": "PERSONNE_MORALE", "commune_wilaya": "34000"}),
         )
-        for criteria in outside_scope:
+        for criteria in valid_cases:
             with self.subTest(criteria=criteria):
-                with self.assertRaises(SearchExecutionError):
-                    validate_first_controlled_search(criteria)
+                validate_first_controlled_search(criteria)
+
+    def test_first_search_policy_rejects_empty_criteria(self) -> None:
+        empty = criteria_from_mapping({"mode": "PERSONNE_MORALE"})
+        with self.assertRaises(SearchExecutionError):
+            validate_first_controlled_search(empty)
 
     def test_post_submit_observation_failure_is_not_retried(self) -> None:
         criteria = criteria_from_mapping({

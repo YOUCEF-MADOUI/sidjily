@@ -245,6 +245,10 @@ class SidjilcomSessionManager:
         """Sélectionner une option observée puis s'arrêter sans soumettre le formulaire."""
         return self._submit_operation("autocomplete_select", token, suggestion_index, require_connected=True)
 
+    def navigate_next_page(self) -> Future[bool]:
+        """Clic sur le lien de page suivante dans les résultats."""
+        return self._submit_operation("navigate_next_page", require_connected=True)
+
     def reset_autocomplete_test(self, token: str) -> Future[AutocompleteResetResult]:
         """Effacer explicitement la valeur temporaire du champ de test."""
         return self._submit_operation("autocomplete_reset", token, require_connected=True)
@@ -384,6 +388,14 @@ class SidjilcomSessionManager:
                     self.config, criteria, confirmed=True, on_step=on_step,
                     on_pre_submit=on_pre_submit,
                 )
+                if not command.future.done():
+                    command.future.set_result(result)
+                return
+
+            if command.name == "navigate_next_page":
+                if self.snapshot.state != SessionState.CONNECTED:
+                    raise SessionNotConnected()
+                result = browser.navigate_next_page(self.config)
                 if not command.future.done():
                     command.future.set_result(result)
                 return

@@ -137,6 +137,60 @@ _RESULTS_DOM_SCRIPT = r"""() => {
 }"""
 
 
+_ROW_DATA_DOM_SCRIPT = r"""() => {
+    const visible = element => {
+        if (!element || !element.isConnected) return false;
+        let current = element;
+        while (current && current.nodeType === Node.ELEMENT_NODE) {
+            const style = window.getComputedStyle(current);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0' ||
+                current.hasAttribute('hidden') || current.getAttribute('aria-hidden') === 'true') return false;
+            current = current.parentElement;
+        }
+        return !!element.getClientRects().length;
+    };
+    const tables = Array.from(document.querySelectorAll('table')).filter(visible);
+    const firstTable = tables[0] || null;
+    if (!firstTable) return {rows: [], headers: []};
+    const headers = Array.from(firstTable.querySelectorAll('thead th, tr th'))
+        .filter(visible).map(cell => (cell.innerText || cell.textContent || '').replace(/\s+/gu, ' ').trim()).filter(Boolean);
+    const bodyRows = Array.from(firstTable.querySelectorAll('tbody tr')).filter(visible);
+    const rows = bodyRows.slice(0, 500).map(tr => {
+        const cells = Array.from(tr.querySelectorAll('td'));
+        return cells.map(td => (td.innerText || td.textContent || '').replace(/\s+/gu, ' ').trim());
+    });
+    return {headers, rows};
+}"""
+
+_NEXT_PAGE_SCRIPT = r"""() => {
+    const visible = element => {
+        if (!element || !element.isConnected) return false;
+        let current = element;
+        while (current && current.nodeType === Node.ELEMENT_NODE) {
+            const style = window.getComputedStyle(current);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0' ||
+                current.hasAttribute('hidden') || current.getAttribute('aria-hidden') === 'true') return false;
+            current = current.parentElement;
+        }
+        return !!element.getClientRects().length;
+    };
+    const nextLink = document.querySelector('a[rel="next"]');
+    if (nextLink && visible(nextLink)) { nextLink.click(); return {clicked: true, method: 'rel_next'}; }
+    const nextByLabel = Array.from(document.querySelectorAll(
+        '[aria-label*="suivant" i], [aria-label*="next" i]'
+    )).filter(el => visible(el) && (el.tagName === 'A' || el.tagName === 'BUTTON'));
+    if (nextByLabel.length === 1) { nextByLabel[0].click(); return {clicked: true, method: 'aria_label'}; }
+    const navs = Array.from(document.querySelectorAll('[role="navigation"], nav')).filter(visible);
+    for (const nav of navs) {
+        const links = Array.from(nav.querySelectorAll('a, button')).filter(visible);
+        const nextTextLink = links.find(el => /suivant|next|»|›/i.test(
+            (el.innerText || el.textContent || '').trim()
+        ));
+        if (nextTextLink) { nextTextLink.click(); return {clicked: true, method: 'text_match'}; }
+    }
+    return {clicked: false};
+}"""
+
 _SESSION_EXPIRY_CHECK_SCRIPT = r"""() => {
     if (/\/(?:login|signin|sign-in|connexion|auth)(?:\/|$)/i.test(location.pathname)) return true;
     if (Array.from(document.querySelectorAll('input[type="password"]')).some(element => {
@@ -1009,6 +1063,19 @@ class PlaywrightSearchDriver:
             result_count = raw.get("resultCount")
             if not isinstance(result_count, int) or result_count < 0:
                 result_count = None
+            rows: tuple[tuple[str, ...], ...] = ()
+            try:
+                row_data = self._page.evaluate(_ROW_DATA_DOM_SCRIPT)
+                if isinstance(row_data, dict):
+                    raw_rows = row_data.get("rows", [])
+                    if isinstance(raw_rows, list):
+                        rows = tuple(
+                            tuple(sanitize_metadata_text(str(cell), 500) for cell in row)
+                            for row in raw_rows[:500]
+                            if isinstance(row, list)
+                        )
+            except Exception:
+                pass
             return SearchObservation(
                 title=title,
                 sanitized_url=sanitized_url,
@@ -1016,6 +1083,7 @@ class PlaywrightSearchDriver:
                 table_count=max(0, int(raw.get("tableCount", 0))),
                 row_count=max(0, int(raw.get("rowCount", 0))),
                 columns=columns,
+                rows=rows,
                 pagination_visible=bool(raw.get("paginationVisible", False)),
                 no_results=bool(raw.get("noResults", False)),
                 errors=errors,
@@ -1027,6 +1095,22 @@ class PlaywrightSearchDriver:
             raise
         except Exception:
             raise SearchResultsObservationError() from None
+
+    def navigate_next_page(self) -> bool:
+        try:
+            if self._page is None or self._page.is_closed() or not is_portal_host(self._page.url, self._portal_url):
+                return False
+            result = self._page.evaluate(_NEXT_PAGE_SCRIPT)
+            if not isinstance(result, dict) or not result.get("clicked"):
+                return False
+            try:
+                self._page.wait_for_load_state("domcontentloaded", timeout=10_000)
+            except Exception:
+                pass
+            self._page.wait_for_timeout(1_000)
+            return True
+        except Exception:
+            return False
 
     def _require_control(self, control: SearchControl, tag_name: str, input_type: str) -> Any:
         if (

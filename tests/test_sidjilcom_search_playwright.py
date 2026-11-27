@@ -73,12 +73,43 @@ class PlaywrightSearchDriverSafetyTests(unittest.TestCase):
         self.assertEqual(observation.columns, ("Dénomination", "Wilaya"))
         self.assertTrue(observation.result_zone_found)
         self.assertEqual(observation.result_zone_tag, "main")
-        self.assertFalse(report["company_rows_collected"])
         self.assertFalse(report["details_opened"])
-        script = page.evaluated[-1]
-        self.assertIn("tbody tr", script)
-        self.assertNotIn("row.innerText", script)
-        self.assertNotIn("row.textContent", script)
+        self.assertEqual(len(page.evaluated), 2)
+
+
+    def test_row_data_is_collected_from_results_table(self) -> None:
+        class RowDataPage(FakePage):
+            def __init__(self) -> None:
+                super().__init__(
+                    f"https://sidjilcom.cnrc.dz{DEFAULT_ENTERPRISE_SEARCH_ROUTE}",
+                    {
+                        "title": "Résultats", "tableCount": 1, "rowCount": 2,
+                        "headers": ["Dénomination", "Wilaya"], "paginationVisible": False,
+                        "noResults": False, "resultCount": 2, "errors": [], "sessionExpired": False,
+                    },
+                )
+                self._call_count = 0
+
+            def evaluate(self, script: str) -> object:
+                self.evaluated.append(script)
+                self._call_count += 1
+                if "session" in script and "expiredPattern" not in script:
+                    return False
+                if self._call_count >= 2 and "rows" in script:
+                    return {
+                        "headers": ["Dénomination", "Wilaya"],
+                        "rows": [["SARL ABC", "Alger"], ["EURL DEF", "Oran"]],
+                    }
+                return self.result_snapshot
+
+        page = RowDataPage()
+        driver = PlaywrightSearchDriver(page, "https://sidjilcom.cnrc.dz", lambda _mode: None)
+        observation = driver.observe_results()
+        self.assertEqual(len(observation.rows), 2)
+        self.assertEqual(observation.rows[0], ("SARL ABC", "Alger"))
+        self.assertEqual(observation.rows[1], ("EURL DEF", "Oran"))
+        self.assertTrue(observation.to_mapping()["company_rows_collected"])
+        self.assertEqual(observation.to_mapping()["rows_collected"], 2)
 
 
 if __name__ == "__main__":
