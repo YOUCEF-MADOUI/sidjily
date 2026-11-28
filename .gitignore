@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Application data (databases, logs, and persistent authentication state)
+data/
+**/browser_profile/
+**/.sidjily-session-established
+**/playwright/.auth/
+**/Cookies
+**/Network/Cookies
+**/Login Data
+**/Local State
+**/Web Data
+*.sqlite3
+*.db
+*.har
+storage_state*.json
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
