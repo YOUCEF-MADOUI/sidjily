@@ -91,6 +91,17 @@ class MockPortalEndToEndTests(unittest.TestCase):
         self.assertFalse(any(label.endswith("Fax") for label, _value in fields))
         self.assertIn(["Information Société — NIF", "000340000000021"], details[1]["fields"])
         self.assertEqual(details[0]["title"], "AUTHENTIQUE SOCIETE 01")
+        # Onglets masqués lus en cliquant dessus : une colonne par en-tête, lignes jointes par « | ».
+        self.assertIn(["Activité Exercée — Code Activité", "442102 | 442103"], fields)
+        self.assertIn(["Associes Physiques — Nom /Prénom", "GERANT 01 | ASSOCIE 01"], fields)
+        self.assertIn(["Associes Physiques — Qualité", "GERANT | ASSOCIE"], fields)
+        self.assertIn(["Associes Physiques — Télephone", "- | 0550000000"], fields)
+        self.assertNotIn("Associes Physiques — Fax", [label for label, _value in fields])
+        self.assertIn(["Modifications — Motif de modification", "RENOUVELLEMENT DE LA DUREE DU RC -PM"], fields)
+        # Aucun champ de l'onglet Société n'est relu sous le nom d'un autre onglet.
+        self.assertFalse([label for label, _value in fields
+                          if label.startswith(("Activité Exercée — Information", "Associes Physiques — Information",
+                                               "Modifications — Information", "Modifications — Code"))])
         # Une nouvelle recherche fonctionne après la lecture des fiches (navigateur hors formulaire).
         again = self.search({**BASE, "raison_sociale": "authentique"})
         self.assertEqual(again.result_count, 1)

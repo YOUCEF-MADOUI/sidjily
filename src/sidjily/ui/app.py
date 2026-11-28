@@ -185,6 +185,12 @@ class SidjilyApp:
             search_buttons, text="Capturer les listes du portail", command=self._capture_search_controls
         )
         self.capture_controls_button.pack(side="left", padx=8)
+        self.auto_details = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            search_buttons,
+            text="Lire automatiquement toutes les fiches après la recherche",
+            variable=self.auto_details,
+        ).pack(side="left", padx=8)
         self.catalog_status = ttk.Label(search_panel, text=self._catalog_status_text(), foreground="#555555")
         self.catalog_status.pack(anchor="w", pady=(7, 0))
         ttk.Label(
@@ -658,6 +664,7 @@ class SidjilyApp:
             pages_read = offset
         suffix = " Pagination interrompue; les lignes déjà lues sont conservées." if interrupted else ""
         self._notify(f"Recherche terminée; {total} ligne(s) collectée(s) sur {pages_read} page(s).{suffix}")
+        self.root.after(200, lambda: self._start_auto_details(search_id))
         if self._diagnostic_report:
             self._set_diagnostic_report(
                 self._diagnostic_report + f"\nTotal collecté : {total} ligne(s) sur {pages_read} page(s).{suffix}"
@@ -671,6 +678,37 @@ class SidjilyApp:
             return
         _ResultsWindow(self, self.selected_search_id)
 
+    AUTO_DETAILS_BATCH = 50
+
+    def _start_auto_details(self, search_id: str) -> None:
+        """Ouvre une à une les fiches pas encore lues (Société, Activité Exercée, Associés
+        Physiques, Modifications), par lots, jusqu'à la dernière ligne de la recherche."""
+        if not self.auto_details.get() or self._closing:
+            return
+        if self.session_manager.snapshot.state != SessionState.CONNECTED:
+            self._notify("Lecture automatique des fiches interrompue : session Sidjilcom non connectée.")
+            return
+        if self._pending_session_operation is not None and not self._pending_session_operation.done():
+            self.root.after(1_000, lambda: self._start_auto_details(search_id))
+            return
+        results = self.manager.get_search_results(search_id)
+        missing = [
+            (result["key"], str(result["detail_url"]))
+            for result in results
+            if result.get("detail_url") and not result.get("detail")
+        ]
+        done = sum(1 for result in results if result.get("detail"))
+        if not missing:
+            if done:
+                self._notify(f"Fiches lues : {done}/{len(results)}. Le CSV contient toutes les informations lues.")
+            return
+        batch = missing[: self.AUTO_DETAILS_BATCH]
+        self._pending_details_context = (search_id, None, True)
+        self._pending_navigation_action = "read_details"
+        self._pending_session_operation = self.session_manager.read_enterprise_details(batch)
+        self._notify(f"Lecture automatique des fiches : {done}/{len(results)} lues, lot de {len(batch)} en cours…")
+        self._refresh_session_status()
+
     def _request_enterprise_details(self, search_id: str, items: list[tuple[str, str]], window: Any) -> bool:
         if self.session_manager.snapshot.state != SessionState.CONNECTED:
             messagebox.showinfo(
@@ -682,7 +720,7 @@ class SidjilyApp:
         if self._pending_session_operation is not None and not self._pending_session_operation.done():
             messagebox.showinfo("Opération en cours", "Attendez la fin de l'opération Sidjilcom en cours.", parent=window.window)
             return False
-        self._pending_details_context = (search_id, window)
+        self._pending_details_context = (search_id, window, False)
         self._pending_navigation_action = "read_details"
         self._pending_session_operation = self.session_manager.read_enterprise_details(items)
         self._notify(f"Lecture de {len(items)} fiche(s) entreprise en cours…")
@@ -694,7 +732,7 @@ class SidjilyApp:
         self._pending_details_context = None
         if context is None:
             return
-        search_id, window = context
+        search_id, window, automatic = context
         try:
             details = future.result()
         except Exception as exc:
@@ -712,11 +750,20 @@ class SidjilyApp:
                 text += f"; {len(failures)} échec(s) : {str(failures[-1].get('error', '')).rstrip('.')}"
             self._notify(text + ".")
         try:
-            if window.window.winfo_exists():
+            if window is not None and window.window.winfo_exists():
                 window.reload()
                 window.set_busy(False)
         except tk.TclError:
             pass
+        expired = any("Session expirée" in str(detail.get("error", "")) for detail in details)
+        progressed = any(detail.get("fields") for detail in details)
+        if automatic and progressed and not expired:
+            # Commerçant suivant : lot suivant des fiches manquantes.
+            self.root.after(500, lambda: self._start_auto_details(search_id))
+        elif automatic and details:
+            self._notify("Lecture automatique des fiches arrêtée"
+                         + (" : session expirée; reconnectez-vous puis « Lire les fiches manquantes »." if expired
+                            else " : aucune fiche lisible dans ce lot."))
         self._refresh_session_status()
 
     def _start_page_collection(self, search_id: str, columns: tuple[str, ...], rows_so_far: int) -> bool:
@@ -1104,6 +1151,8 @@ class SidjilyApp:
             else:
                 status_text = "Recherche terminée; aucune ligne collectée."
             self._notify(status_text)
+            if rows_stored and not collecting_more:
+                self.root.after(200, lambda: self._start_auto_details(search_id))
         self.refresh()
         self._refresh_session_status()
 

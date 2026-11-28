@@ -249,25 +249,33 @@ _SESSION_EXPIRY_CHECK_SCRIPT = r"""() => {
 }"""
 
 
-_DETAIL_DOM_SCRIPT = r"""() => {
+_DETAIL_DOM_SCRIPT = r"""(options) => {
+    // Onglet de fiche autre que le premier : ses libellés sont préfixés par le nom de l'onglet.
+    const prefix = options && options.prefix ? String(options.prefix) + ' — ' : '';
+    // Onglet lu par son panneau (id) : le portail change d'onglet avec une transition, pendant
+    // laquelle l'ancien panneau est encore visible et le nouveau pas encore. On lit donc le
+    // panneau demandé quel que soit son affichage, et lui seul.
+    const scope = options && options.scope ? document.getElementById(String(options.scope)) : null;
+    const root = scope || document;
     const visible = element => {
         if (!element || !element.isConnected) return false;
         let current = element;
-        while (current && current.nodeType === Node.ELEMENT_NODE) {
+        while (current && current.nodeType === Node.ELEMENT_NODE && current !== scope) {
             const style = window.getComputedStyle(current);
             if (style.display === 'none' || style.visibility === 'hidden' ||
                 current.hasAttribute('hidden') || current.getAttribute('aria-hidden') === 'true') return false;
             current = current.parentElement;
         }
+        if (scope) return scope.contains(element);
         return !!element.getClientRects().length;
     };
     const clean = text => String(text || '').replace(/\s+/gu, ' ').trim();
     const fields = [];
     const seen = new Set();
     const push = (rawLabel, rawValue) => {
-        const label = clean(rawLabel).replace(/\s*:\s*$/u, '');
+        const label = prefix + clean(rawLabel).replace(/\s*:\s*$/u, '');
         const value = clean(rawValue).replace(/^:\s*/u, '');
-        if (!label || !value || label.length > 120 || value.length > 1000 || label === value) return;
+        if (!label || !value || label.length > 160 || value.length > 4000 || label === value) return;
         const key = label + '\u0000' + value;
         if (seen.has(key)) return;
         seen.add(key);
@@ -291,13 +299,33 @@ _DETAIL_DOM_SCRIPT = r"""() => {
     const isFormControlLabel = element => !!(element.control ||
         element.querySelector('input, select, textarea') ||
         (element.nextElementSibling && element.nextElementSibling.matches('input, select, textarea')));
-    for (const dt of document.querySelectorAll('dl > dt')) {
+    for (const dt of root.querySelectorAll('dl > dt')) {
         if (!visible(dt)) continue;
         const dd = dt.nextElementSibling;
         if (dd && dd.tagName === 'DD') push(dt.innerText, dd.innerText);
     }
-    for (const tr of document.querySelectorAll('table tr')) {
-        if (!visible(tr) || tr.closest('thead')) continue;
+    // Tableaux à en-têtes (Activité Exercée, Associés Physiques, Modifications) : une colonne par
+    // en-tête, les valeurs des lignes jointes par « | » dans le même ordre d'une colonne à l'autre.
+    const headerTables = new Set();
+    for (const table of root.querySelectorAll('table')) {
+        if (!visible(table)) continue;
+        const headers = Array.from(table.querySelectorAll('thead th')).map(cell => clean(cell.innerText));
+        if (headers.length < 2) continue;
+        headerTables.add(table);
+        const bodyRows = Array.from(table.querySelectorAll('tbody tr')).filter(visible)
+            .map(tr => Array.from(tr.children).filter(cell => /^(?:TH|TD)$/.test(cell.tagName)).map(cell => clean(cell.innerText)))
+            .filter(cells => cells.some(value => value && value !== '-'))
+            .slice(0, 50);
+        if (!bodyRows.length) continue;
+        headers.forEach((header, index) => {
+            if (!header) return;
+            const values = bodyRows.map(cells => cells[index] || '-');
+            if (values.every(value => !value || value === '-')) return;
+            push(header, values.join(' | '));
+        });
+    }
+    for (const tr of root.querySelectorAll('table tr')) {
+        if (!visible(tr) || tr.closest('thead') || headerTables.has(tr.closest('table'))) continue;
         const cells = Array.from(tr.children).filter(cell => /^(?:TH|TD)$/.test(cell.tagName));
         if (cells.some(cell => cell.querySelector('input, select, textarea'))) continue;
         if (cells.length === 2) push(cells[0].innerText, cells[1].innerText);
@@ -306,7 +334,7 @@ _DETAIL_DOM_SCRIPT = r"""() => {
             push(cells[2].innerText, cells[3].innerText);
         }
     }
-    for (const label of document.querySelectorAll('label, .control-label, .field-label, dt, strong, b')) {
+    for (const label of root.querySelectorAll('label, .control-label, .field-label, dt, strong, b')) {
         if (!visible(label) || label.closest('table, dl') || isFormControlLabel(label)) continue;
         const text = clean(label.innerText);
         const strongLike = label.matches('strong, b');
@@ -1575,6 +1603,49 @@ class PlaywrightSearchDriver:
             "fields": [pair for pair in fields if pair[0] and pair[1]],
         }
 
+    def _read_detail_tabs(self, detail_page: Any) -> dict[str, object]:
+        """Lit chaque onglet de la fiche (Société, Activité Exercée, Associés Physiques, Modifications)
+        en cliquant dessus comme l'utilisateur, puis fusionne les champs."""
+        def poll(options: dict[str, str], limit_ms: int) -> object:
+            raw: object = None
+            waited = 0
+            while waited <= limit_ms:
+                raw = detail_page.evaluate(_DETAIL_DOM_SCRIPT, options)
+                if isinstance(raw, dict) and (raw.get("fields") or raw.get("sessionExpired")):
+                    break
+                detail_page.wait_for_timeout(500)
+                waited += 500
+            return raw
+
+        tabs = detail_page.locator("ul.nav-tabs a.nav-link")
+        names = [name.strip() for name in tabs.all_inner_texts()] if tabs.count() else []
+        panes = []
+        for index in range(len(names)):
+            target = (tabs.nth(index).get_attribute("href") or "").strip()
+            panes.append(target[1:] if re.fullmatch(r"#[\w-]+", target) else "")
+        first_options = {"prefix": "", "scope": panes[0]} if panes and panes[0] else {"prefix": ""}
+        first = poll(first_options, self._results_timeout_ms)
+        if not names or not isinstance(first, dict) or first.get("sessionExpired"):
+            return first
+        fields = list(first.get("fields", []))
+        for index, name in enumerate(names[1:], start=1):
+            try:
+                tabs.nth(index).click(timeout=self._timeout_ms)
+            except Exception:
+                pass
+            if not panes[index]:
+                continue
+            raw = poll({"prefix": name, "scope": panes[index]}, 5_000)
+            if isinstance(raw, dict):
+                if raw.get("sessionExpired"):
+                    return raw
+                fields.extend(raw.get("fields", []))
+        try:
+            tabs.nth(0).click(timeout=self._timeout_ms)
+        except Exception:
+            pass
+        return {**first, "fields": fields}
+
     def _read_detail_by_action(self, token: str, function: str, ident: str) -> dict[str, object]:
         """Ouvre la fiche comme l'interface du portail (menu « Details »), dans l'onglet qu'il crée."""
         self._require_search_page()
@@ -1603,14 +1674,7 @@ class PlaywrightSearchDriver:
                 pass
             if not is_portal_host(detail_page.url, self._portal_url):
                 raise SearchNavigationUnexpected()
-            raw: object = None
-            waited = 0
-            while waited <= self._results_timeout_ms:
-                raw = detail_page.evaluate(_DETAIL_DOM_SCRIPT)
-                if isinstance(raw, dict) and (raw.get("fields") or raw.get("sessionExpired")):
-                    break
-                detail_page.wait_for_timeout(1_000)
-                waited += 1_000
+            raw = self._read_detail_tabs(detail_page)
         except SearchExecutionError:
             raise
         except Exception:
@@ -1625,8 +1689,8 @@ class PlaywrightSearchDriver:
         if raw.get("sessionExpired"):
             raise SearchSessionExpired()
         fields = [
-            [clean_data_text(pair[0], 120), clean_data_text(pair[1], 1000)]
-            for pair in raw.get("fields", [])[:200]
+            [clean_data_text(pair[0], 160), clean_data_text(pair[1], 4000)]
+            for pair in raw.get("fields", [])[:300]
             if isinstance(pair, (list, tuple)) and len(pair) == 2
         ]
         kept = [pair for pair in fields if pair[0] and pair[1]]

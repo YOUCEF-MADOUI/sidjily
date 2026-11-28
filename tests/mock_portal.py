@@ -373,11 +373,21 @@ def _pair(label: str, value: str) -> str:
             f'<div class="col-md-6 col-sm-12"><label>{html.escape(value)}</label></div></div></div></div>')
 
 
+def _tab_table(pane_id: str, headers: list[str], rows: list[list[str]]) -> str:
+    head = "".join(f"<th>{html.escape(header)}</th>" for header in headers)
+    body = "".join("<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row) + "</tr>" for row in rows)
+    return (f'<div id="{pane_id}" class="tab-pane" style="display:none"><table class="table">'
+            f'<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>')
+
+
 def detail_page_real(company: Company) -> str:
     """Fiche telle que l'affiche le portail réel : onglets et colonnes libellé | valeur."""
     body = ('<h2 class="hide-accessible-x">Navigation</h2>'
-            '<div class="rech-nav-container"><ul class="nav nav-tabs"><li class="nav-item">'
-            '<a class="nav-link active" href="#tab_0">Société</a></li></ul></div>'
+            '<div class="rech-nav-container"><ul class="nav nav-tabs">'
+            '<li class="nav-item"><a class="nav-link active" href="#tab_0">Société</a></li>'
+            '<li class="nav-item"><a class="nav-link" href="#tab_1">Activité Exercée</a></li>'
+            '<li class="nav-item"><a class="nav-link" href="#tab_2">Associes Physiques</a></li>'
+            '<li class="nav-item"><a class="nav-link" href="#tab_4">Modifications</a></li></ul></div>'
             '<div class="tab-content"><div id="tab_0" class="tab-pane active"><fieldset>'
             '<div class="tecket"><span>Information Société</span></div>'
             + _pair("Numéro d'inscription", company.rc)
@@ -392,7 +402,25 @@ def detail_page_real(company: Company) -> str:
               f'<div class="col-md-3"><label>{html.escape(company.name)}</label></div>'
               '<div class="col-md-3"><label>Date début expoiltation :</label></div>'
               '<div class="col-md-3"><label>16/06/2002</label></div></div>'
-            + '</fieldset></div></div>')
+            + '</fieldset></div>'
+            # Onglets masqués tant qu'on ne clique pas dessus (comme sur le portail réel).
+            + _tab_table("tab_1", ["Code Activité", "Activité", "Numéro d´Agrément"], [
+                [company.activite.split(" : ")[0], company.activite.split(" : ")[-1], ""],
+                ["442103", "COMMERCE DE GROS DE LEGUMES", ""],
+            ])
+            + _tab_table("tab_2", ["Nom /Prénom", "Date de Naiss", "Lieu Naiss", "Qualité", "Télephone", "Fax", "Nationalité"], [
+                [f"GERANT {company.ident:02d}", "11/10/1961", "MANSOURA", "GERANT", "-", "-", "ALGERIENNE"],
+                [f"ASSOCIE {company.ident:02d}", "02/03/1970", "ALGER", "ASSOCIE", "0550000000", "-", "ALGERIENNE"],
+                ["", "", "", "", "", "", ""],
+            ])
+            + _tab_table("tab_4", ["Date Modification :", "Motif de modification"], [
+                ["02/10/2025", "RENOUVELLEMENT DE LA DUREE DU RC -PM"],
+            ])
+            + '</div><script>document.querySelectorAll(".nav-tabs a").forEach(link => link.addEventListener("click", event => {'
+              'event.preventDefault();'
+              # Transition « fade » : pendant 600 ms l'ancien panneau reste affiché, le nouveau pas encore.
+              'setTimeout(() => { document.querySelectorAll(".tab-pane").forEach(pane => pane.style.display = "none");'
+              'document.querySelector(link.getAttribute("href")).style.display = "block"; }, 600); }));</script>')
     return _page("Sidjilcom - CNRC", body)
 
 
